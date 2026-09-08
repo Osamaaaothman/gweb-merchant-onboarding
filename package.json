@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=20 <21"
+    "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -25,10 +25,12 @@
   "homepage": "https://github.com/Osamaaaothman/gweb-merchant-onboarding#readme",
   "description": "AWS Lambda-only merchant onboarding & underwriting intake layer (GWEB coding assessment).",
   "devDependencies": {
+    "@types/aws-lambda": "^8.10.163",
     "@types/jest": "^30.0.0",
-    "@types/node": "^20.19.43",
+    "@types/node": "^22.20.1",
     "@typescript-eslint/eslint-plugin": "^8.70.0",
     "@typescript-eslint/parser": "^8.70.0",
+    "esbuild": "^0.28.2",
     "eslint": "^10.10.0",
     "jest": "^30.5.1",
     "ts-jest": "^29.4.12",

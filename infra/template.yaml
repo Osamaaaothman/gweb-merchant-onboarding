@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  GWEB Merchant Onboarding & Underwriting Intake Layer — Lambda-only backend.
+  Compute is AWS Lambda exclusively; see docs/03-ARCHITECTURE-RULES.md §1 for the
+  constraint this template exists to satisfy. No EC2/ECS/EKS/Fargate/App Runner
+  resource type appears anywhere in this file.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment stage; suffixes resource names so dev/staging/prod never collide.
+
+  DeadlineTargetMs:
+    Type: Number
+    Default: 35000
+    Description: >
+      Internal deadline target in ms (see shared/deadline/DeadlineBudget.ts). Must stay
+      below the 45000ms hard ceiling — that ceiling is a fixed constant in code, not a
+      parameter, because it is a contract with the caller, not a tuning knob.
+
+  PresignTtlSeconds:
+    Type: Number
+    Default: 300
+    Description: Time-to-live for S3 pre-signed upload URLs.
+
+  AiProvider:
+    Type: String
+    Default: mock
+    AllowedValues: [mock, anthropic]
+    Description: Evaluation adapter to wire up. Defaults to mock — no credentials required.
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    # The 45-second hard ceiling from the assessment brief, configured as the actual
+    # Lambda timeout too: a backstop in case application-level deadline logic ever
+    # fails to self-terminate. Under normal operation every handler returns well
+    # before this, bounded by DeadlineTargetMs.
+    Timeout: 45
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        DEADLINE_TARGET_MS: !Ref DeadlineTargetMs
+        PRESIGN_TTL_SECONDS: !Ref PresignTtlSeconds
+        AI_PROVIDER: !Ref AiProvider
+        LOG_LEVEL: info
+
+Resources:
+  # --- State: DynamoDB -------------------------------------------------------------
+  # Single-table design. Full access-pattern documentation and the single- vs
+  # multi-table tradeoff land in ADR-0003 (Phase 2) once real access patterns exist —
+  # this Phase-1 skeleton only proves the resource, encryption, and PITR settings.
+  ApplicationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub gweb-applications-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # --- Documents: S3 -----------------------------------------------------------------
+  # Private, block-public-access, encrypted, versioned. Pre-signed PUT is the only
+  # upload path — no Lambda ever receives a document body. Lifecycle policy for
+  # abandoned applications lands in Phase 4 alongside the document lifecycle state
+  # machine (docs/04-SECURITY-RULES.md §6).
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub gweb-documents-${Stage}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [PUT]
+            # Tightened to the deployed web app's real origin once one exists
+            # (Phase 11) — wildcard is a known, documented Phase-1 gap, not an
+            # oversight. See README "Known gaps".
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+
+  # --- API ---------------------------------------------------------------------------
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Stage
+
+  # --- Functions -----------------------------------------------------------------------
+  HealthFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "node22"
+        Sourcemap: true
+        EntryPoints:
+          - handlers/health.ts
+    Properties:
+      FunctionName: !Sub gweb-health-${Stage}
+      Handler: health.handler
+      CodeUri: ..
+      Description: Liveness check. Touches no AWS resource beyond CloudWatch Logs.
+      Events:
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /v1/health
+            Method: GET
+      # No explicit Policies block: this function needs nothing beyond the
+      # AWSLambdaBasicExecutionRole SAM attaches by default (CloudWatch Logs only).
+      # Every later function that touches DynamoDB/S3 gets its own scoped Policies —
+      # never a shared "app role" (docs/04-SECURITY-RULES.md §4).
+
+Outputs:
+  HttpApiUrl:
+    Description: Base URL of the HTTP API for this stage.
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}
+  ApplicationsTableName:
+    Value: !Ref ApplicationsTable
+  DocumentsBucketName:
+    Value: !Ref DocumentsBucket
