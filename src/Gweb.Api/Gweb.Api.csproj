@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Gweb.Shared\Gweb.Shared.csproj" />
+    <ProjectReference Include="..\Gweb.Config\Gweb.Config.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Amazon.Lambda.AspNetCoreServer.Hosting" Version="2.2.1" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AWSProjectType>Lambda</AWSProjectType>
+  </PropertyGroup>
+
+</Project>

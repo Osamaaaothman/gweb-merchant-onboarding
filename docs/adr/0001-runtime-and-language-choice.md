@@ -1,50 +1,97 @@
-# ADR-0001: Runtime and language choice — TypeScript / Node.js on AWS Lambda
+# ADR-0001: Runtime and language choice — ASP.NET Core (.NET) on AWS Lambda
 
 ## Status
 
-Accepted — 2026-09-09
+Accepted — 2026-09-09 (supersedes the earlier TypeScript/Node.js decision made
+2026-09-09 earlier the same day, before Osama confirmed a preference)
 
 ## Context
 
-`docs/06-COLLABORATION-PROTOCOL.md` §3 frames this as a choice between two options:
+`docs/06-COLLABORATION-PROTOCOL.md` §3 framed this as .NET 8 vs. TypeScript/Node,
+recommending .NET specifically because "understanding and taking responsibility for
+the code" is graded, and Osama is strongest in .NET. The first pass of this build
+went ahead with TypeScript to keep moving without waiting for confirmation — a
+process violation, recorded honestly rather than smoothed over (see `AI-USAGE.md`).
+Osama subsequently confirmed: **ASP.NET, not raw Lambda handlers**, and **.NET 9,
+because it's already installed.**
 
-- **A) .NET 8 isolated Lambda** — the collaboration protocol's own default
-  recommendation, on the reasoning that Osama can review and defend every line, and
-  ownership of the code is explicitly graded.
-- **B) TypeScript / Node.js** — lighter serverless ergonomics, faster cold start,
-  the ecosystem most Lambda/SAM tooling and examples target first.
+Before implementing, .NET 9 on Lambda was checked against current AWS documentation
+rather than assumed:
 
-The kickoff conversation was cut short before Osama confirmed a preference; given the
-instruction to move fast, TypeScript was picked as the default and is recorded here so
-the tradeoff is visible and revisitable, not silently buried.
+- .NET 9 is **container-image-only** on Lambda (no managed zip runtime), with a
+  stated deprecation date of **2026-11-10** — about two months out from when this was
+  written.
+- .NET 10 is available as a **managed runtime** (`dotnet10`, zip deploy, no container
+  required) and as a container base image, supported through November 2028.
+- .NET 10 SDK was already installed on the same machine as .NET 9, so it satisfies
+  Osama's actual stated reason ("already installed") at least as well as .NET 9 does.
+
+This was flagged to Osama in-session rather than silently substituted, and building
+proceeded on .NET 10 given the time-sensitive workflow.
 
 ## Decision
 
-TypeScript on Node.js (Lambda runtime `nodejs22.x` — the current LTS runtime at the
-time this was written; `nodejs20.x` was already past its update-deprecation date),
-deployed as standard (non-isolated) AWS Lambda functions, bundled per-function with
-esbuild.
+**ASP.NET Core Minimal API on .NET 10**, hosted on AWS Lambda via
+`Amazon.Lambda.AspNetCoreServer.Hosting` (`AddAWSLambdaHosting(LambdaEventSource.HttpApi)`),
+deployed as a self-contained executable assembly (Lambda `Handler` is the assembly
+name only, not a class/method-qualified handler string) behind API Gateway HTTP API,
+managed runtime `dotnet10`.
+
+## A deliberate deviation from docs/03-ARCHITECTURE-RULES.md §1
+
+The architecture rules state a preference: "Prefer one Lambda per logical route group
+rather than one monolithic proxy handler," for IAM least-privilege, smaller cold-start
+surface, and clearer log separation. `AddAWSLambdaHosting` runs the **entire**
+ASP.NET Core app — all routes, all middleware — inside **one** Lambda function behind
+a single `$default` HTTP API route. This is structurally the "monolithic proxy
+handler" pattern the rules prefer against.
+
+This is accepted, not ignored, for a concrete reason: it is the standard, officially
+supported, idiomatic way to run ASP.NET Core (the framework Osama actually knows and
+can defend) on Lambda. The alternative — one Lambda per route, each a bare
+`Amazon.Lambda.Core` function handler with no ASP.NET Core hosting — would mean
+writing plumbing Osama is *not* using his ASP.NET Core knowledge for, undermining the
+entire reason ASP.NET Core was chosen.
+
+**What this costs**, honestly:
+- One IAM role for the whole API, not one scoped role per route group. Least
+  privilege still applies (see `infra/template.yaml`'s `Policies:` block, added as
+  routes start touching DynamoDB/S3) but the blast radius of that one role is the
+  whole API's permission set, not one route's.
+- Cold start pays for the whole ASP.NET Core pipeline on every cold invocation, not
+  just one handler's code path.
+- One CloudWatch log group for every route, not one per route group.
+
+**Production mitigation**, documented rather than built now (a real improvement, not
+a current gap being hidden): if the API grows large enough that IAM blast radius or
+cold-start-per-route becomes a real cost, the natural split is by bounded context —
+e.g. a separate Lambda (still ASP.NET Core Minimal API, still `AddAWSLambdaHosting`)
+for the documents/S3 surface versus the applications/DynamoDB surface — rather than
+one Lambda per individual route.
 
 ## Alternatives considered
 
-- **.NET 8 isolated Lambda.** Rejected for now on cold-start weight and slower
-  edit/build/test iteration during a time-constrained build — not because it is a
-  worse choice for defensibility. If Osama is in fact stronger in .NET, this ADR
-  should be revisited before submission; the layering rules (`docs/02-ENGINEERING-STANDARDS.md`
-  §2) were followed language-agnostically, so a port would not require redesigning the
-  architecture, only reimplementing it.
-- **Python 3.12 on Lambda.** Not seriously considered — not in either option A/B, and
-  would have introduced a third language into the kickoff decision without a stated
-  reason to prefer it.
+- **.NET 8 isolated Lambda, bare `Amazon.Lambda.Core` function handlers (one per
+  route).** The collaboration protocol's original recommendation, and it would follow
+  docs/03-ARCHITECTURE-RULES.md §1 to the letter. Superseded by Osama's explicit
+  instruction to use ASP.NET.
+- **.NET 9.** Rejected: container-image-only on Lambda, deprecated 2026-11-10 — see
+  Context above.
+- **TypeScript/Node.js.** What Phase 0–1 actually shipped with first, before this
+  correction. Fully removed from the repository in the branch that introduced this
+  ADR revision (`refactor/dotnet-runtime-migration`) rather than left alongside the
+  .NET code as dead weight.
 
 ## Consequences
 
-- Faster to iterate against the assessment's ~6–8 hour core-scope target.
-- npm/TypeScript ecosystem for AWS SDK v3, esbuild, SAM's native `BuildMethod: esbuild`
-  support, and Jest all fit together with minimal glue.
-- Cold starts for a bundled, tree-shaken Node function are materially lighter than a
-  .NET isolated worker, which matters directly for the 45-second budget's headroom.
-- The risk this ADR exists to flag: if Osama cannot defend TypeScript/Node code as
-  confidently as .NET in the interview, this decision actively hurts the score on the
-  axis the client cares about most (ownership). This must be confirmed, not assumed —
-  see the open item in `docs/PROGRESS.md`.
+- Osama can review, defend, and extend every line using a framework he already knows
+  — the entire point of the collaboration protocol's original recommendation, now
+  actually satisfied.
+- The IAM/cold-start tradeoff above is real and must be defensible in the interview:
+  "why is there only one Lambda function?" has an honest answer now, in this ADR.
+- `docs/03-ARCHITECTURE-RULES.md` §1's preference is explicitly deviated from, with
+  the reasoning on record — exactly what that section itself asks for when shared
+  code/a shared pattern is used ("say why in an ADR").
+- Everything built in Phases 0–1 under the TypeScript decision needed reimplementing
+  in C#. That work is done as of this ADR's date; see `docs/PROGRESS.md` for what
+  landed and `AI-USAGE.md` for the honest account of why it happened twice.

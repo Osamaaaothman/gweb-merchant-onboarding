@@ -1,0 +1,14 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Needed for Microsoft.AspNetCore.Http.IResult/Results in HttpErrorMapper — this
+         is a plain class library, so the ASP.NET Core shared framework isn't referenced
+         by default the way it is in an SDK="Microsoft.NET.Sdk.Web" project. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+</Project>

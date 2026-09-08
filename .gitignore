@@ -1,11 +1,13 @@
 # Dependencies
 node_modules/
 
-# Build output
+# .NET build output
 dist/
 bin/
 obj/
 coverage/
+*.user
+.vs/
 
 # Serverless / IaC build artifacts
 .aws-sam/

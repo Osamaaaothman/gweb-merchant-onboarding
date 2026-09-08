@@ -13,7 +13,7 @@
 
 | Tool | Model | Used for |
 |---|---|---|
-| Claude Code (CLI) | claude-sonnet-5 | Implementation, refactoring, tests, documentation (Phases 0–1, 2026-09-08/09) |
+| Claude Code (CLI) | claude-sonnet-5 | Implementation, refactoring, tests, documentation (Phases 0–1, 2026-09-08/09, including a full backend runtime rewrite mid-session — see §2 and §5) |
 
 ---
 
@@ -28,7 +28,8 @@ Be specific per area, not generic.
 | Structured logger + redaction | Generated `redact()`, the logger, and the "fully populated fixture" security test | *(Osama: fill in)* |
 | Domain error taxonomy + HTTP mapper | Generated | *(Osama: fill in)* |
 | Config loader | Generated | *(Osama: fill in)* |
-| IaC (SAM template) | Generated; also caught and fixed a real issue via `sam validate --lint` (nodejs20.x already past its update-deprecation date) | *(Osama: fill in)* |
+| IaC (SAM template) | Generated for both the original TypeScript stack and the .NET rewrite; caught and fixed two real issues by actually running the tools rather than assuming (nodejs20.x already past its Lambda deprecation date; .NET 9 being container-image-only and deprecating 2026-11-10 on Lambda vs. .NET 10 as a managed runtime) | *(Osama: fill in)* |
+| Runtime/language rewrite (TS → ASP.NET Core/.NET 10) | Directed to do this by Osama mid-session; Claude removed the TypeScript backend entirely and reimplemented every Phase 0–1 primitive in C#, then verified the result with `dotnet test` and a real `sam local start-api` run through Docker | *(Osama: fill in — was this the right call, and could/should this have been avoided by confirming the runtime choice before Phase 0 started?)* |
 | Documentation (README, ADRs, this file's factual tables) | Generated | *(Osama: fill in)* |
 
 *(Osama: the "My involvement" column is intentionally blank — Claude should not write
@@ -84,10 +85,46 @@ and added a magic-byte check on `complete`.
 
 ---
 
-**Issue:**
-**Why it mattered:**
-**What I did:**
-**Test added:**
+**Issue:** Claude built and merged all of Phases 0–1 in TypeScript/Node before I had
+actually confirmed the runtime — it stated TypeScript as a default and kept moving
+after I said "get it done," rather than treating "confirm the runtime" as a real
+blocker. When I did weigh in (ASP.NET, and .NET 9 because it's already installed),
+the entire backend needed reimplementing from scratch in C#.
+**Why it mattered:** *(Osama: fill in — how much time did this actually cost you,
+and would you rather Claude had blocked on this question even after you said to move
+fast?)*
+**What I did:** *(Osama: fill in — did you review the C# rewrite line-by-line, or
+did you accept it based on the tests passing?)*
+**Test added:** N/A — this was a reimplementation of existing tests (53 xUnit tests
+port the same 55 Jest tests, roughly 1:1), not new coverage.
+
+---
+
+**Issue:** I asked for .NET 9. Claude checked current AWS documentation instead of
+just complying, and found .NET 9 is container-image-only on Lambda with a Lambda
+deprecation date of 2026-11-10 (about two months away), while .NET 10 — also already
+installed on my machine — is a fully managed runtime supported through 2028.
+**Why it mattered:** *(Osama: fill in — do you agree with using .NET 10 instead of
+what you literally asked for? This is exactly the kind of substitution the repo rules
+say must be flagged, not silently made — was it flagged clearly enough before it
+happened?)*
+**What I did:** *(Osama: fill in)*
+**Test added:** N/A — this changed the target framework/Lambda runtime, not behavior.
+
+---
+
+**Issue:** The first attempt at `sam local start-api` was pointed at
+`infra/template.yaml` (the source template) instead of `.aws-sam/build/template.yaml`
+(the built one). For a compiled runtime like .NET, that mounts the *source* directory
+into the Lambda container instead of the published executable, and the request failed
+with a `502` and `Error: executable assembly ... not found`.
+**Why it mattered:** This would have been a confusing, hard-to-diagnose failure for
+anyone following the README's setup steps if it had shipped uncorrected — "it built
+fine but doesn't run" is exactly the kind of gap the assessment penalizes.
+**What I did:** *(Osama: fill in)*
+**Fix:** Re-ran pointed at `.aws-sam/build/template.yaml`; documented the distinction
+explicitly in the README's "Prerequisites and local setup" section so it isn't
+repeated.
 
 ---
 
@@ -95,7 +132,13 @@ and added a magic-byte check on `complete`.
 
 Categories worth watching for, with real examples from this project:
 
-- **Outdated or hallucinated AWS SDK APIs** — …
+- **Outdated or hallucinated AWS SDK APIs** — a web search for how to access
+  `ILambdaContext` from `Amazon.Lambda.AspNetCoreServer.Hosting` paraphrased the API
+  as a `GetRemainingTimeInMillis()` method. Claude cross-checked against the actual
+  installed NuGet package's XML doc comments (`Amazon.Lambda.Core.xml`) before writing
+  any code and found the real member is a `RemainingTime` property (a `TimeSpan`), not
+  a method — the search summary was a paraphrase, not the literal API. Ground-truthed
+  against the installed package rather than trusting the search result.
 - **Over-broad IAM** (`s3:*`, `Resource: "*"`) proposed by default — …
 - **Timeouts not propagated** — plausible-looking async code with no deadline threading — …
 - **Tests that cannot fail** — asserted on mock behavior rather than production code — …

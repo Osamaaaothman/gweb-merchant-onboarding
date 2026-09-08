@@ -14,9 +14,11 @@ functions, one HTTP API, one DynamoDB table, one S3 bucket. Local simulation
 
 ## Decision
 
-AWS SAM, with the template at `infra/template.yaml` and per-function esbuild bundling
-via `Metadata.BuildMethod: esbuild` (native SAM CLI support for TypeScript Lambdas —
-no separate bundler config to maintain).
+AWS SAM, with the template at `infra/template.yaml`. `sam build` uses its native
+`dotnet` build support (backed by `dotnet publish` via the Amazon.Lambda.Tools global
+tool) — no separate bundler config to maintain. (An earlier version of this ADR
+referenced esbuild, from when the backend was TypeScript; see ADR-0001 for why that
+changed.)
 
 ## Alternatives considered
 
@@ -35,10 +37,13 @@ no separate bundler config to maintain).
 
 - `sam build` + `sam local start-api` is the whole local dev loop; no LocalStack or
   additional emulation layer needed for Lambda/API Gateway.
-- IAM roles are SAM's per-function `Policies:` blocks — least privilege is expressed
-  directly next to the function that needs it, not in a separate role-management
-  layer, which keeps the "can you justify every permission" review (docs/04-SECURITY-RULES.md
-  §4) a matter of reading `infra/template.yaml` top to bottom.
+- IAM is SAM's `Policies:` block on the function resource — least privilege is
+  expressed directly in `infra/template.yaml`, not in a separate role-management
+  layer, keeping the "can you justify every permission" review (docs/04-SECURITY-RULES.md
+  §4) a matter of reading the template top to bottom. Note: since ADR-0001, this is
+  **one** function for the whole API rather than one per route, so this is one
+  `Policies:` block covering everything the API touches, not several narrowly scoped
+  ones — a tradeoff recorded in ADR-0001, not this one.
 - Tradeoff accepted: SAM's CloudFormation-based deploys are slower to iterate on than
   CDK's diff-based deploys for large stacks. Not a real cost here given the stack's
   size, but would need revisiting if this grew well beyond Tier-1 scope.

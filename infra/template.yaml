@@ -17,9 +17,9 @@ Parameters:
     Type: Number
     Default: 35000
     Description: >
-      Internal deadline target in ms (see shared/deadline/DeadlineBudget.ts). Must stay
-      below the 45000ms hard ceiling — that ceiling is a fixed constant in code, not a
-      parameter, because it is a contract with the caller, not a tuning knob.
+      Internal deadline target in ms (see src/Gweb.Shared/Deadline/DeadlineBudget.cs).
+      Must stay below the 45000ms hard ceiling — that ceiling is a fixed constant in
+      code, not a parameter, because it is a contract with the caller, not a tuning knob.
 
   PresignTtlSeconds:
     Type: Number
@@ -28,26 +28,26 @@ Parameters:
 
   AiProvider:
     Type: String
-    Default: mock
-    AllowedValues: [mock, anthropic]
-    Description: Evaluation adapter to wire up. Defaults to mock — no credentials required.
+    Default: Mock
+    AllowedValues: [Mock, Anthropic]
+    Description: Evaluation adapter to wire up. Defaults to Mock — no credentials required.
 
 Globals:
   Function:
-    Runtime: nodejs22.x
+    Runtime: dotnet10
     # The 45-second hard ceiling from the assessment brief, configured as the actual
     # Lambda timeout too: a backstop in case application-level deadline logic ever
-    # fails to self-terminate. Under normal operation every handler returns well
+    # fails to self-terminate. Under normal operation every request returns well
     # before this, bounded by DeadlineTargetMs.
     Timeout: 45
-    MemorySize: 256
+    MemorySize: 512
     Tracing: Active
     Environment:
       Variables:
         DEADLINE_TARGET_MS: !Ref DeadlineTargetMs
         PRESIGN_TTL_SECONDS: !Ref PresignTtlSeconds
         AI_PROVIDER: !Ref AiProvider
-        LOG_LEVEL: info
+        LOG_LEVEL: Info
 
 Resources:
   # --- State: DynamoDB -------------------------------------------------------------
@@ -111,32 +111,31 @@ Resources:
       StageName: !Ref Stage
 
   # --- Functions -----------------------------------------------------------------------
-  HealthFunction:
+  # One Lambda hosts the whole ASP.NET Core Minimal API app (Amazon.Lambda.AspNetCoreServer.Hosting
+  # + AddAWSLambdaHosting) rather than one function per route. This deliberately
+  # deviates from docs/03-ARCHITECTURE-RULES.md §1's stated preference for
+  # one-Lambda-per-route-group — see docs/adr/0001-runtime-and-language-choice.md for
+  # why, and the IAM/blast-radius tradeoff it costs.
+  ApiFunction:
     Type: AWS::Serverless::Function
-    Metadata:
-      BuildMethod: esbuild
-      BuildProperties:
-        Minify: false
-        Target: "node22"
-        Sourcemap: true
-        EntryPoints:
-          - handlers/health.ts
     Properties:
-      FunctionName: !Sub gweb-health-${Stage}
-      Handler: health.handler
-      CodeUri: ..
-      Description: Liveness check. Touches no AWS resource beyond CloudWatch Logs.
+      FunctionName: !Sub gweb-api-${Stage}
+      # Deploying an ASP.NET Core app hosted via AddAWSLambdaHosting as an executable
+      # assembly means the handler string is just the assembly name — no
+      # Assembly::Namespace.Class::Method qualifier, unlike a classic library handler.
+      Handler: Gweb.Api
+      CodeUri: ../src/Gweb.Api/
+      Description: Hosts the full ASP.NET Core Minimal API.
+      # No explicit Policies block yet: Phase 1 only has the health endpoint, which
+      # touches nothing beyond CloudWatch Logs. DynamoDB/S3 permissions get added
+      # here (scoped, never wildcard) as the endpoints that need them land.
       Events:
-        Health:
+        Proxy:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
-            Path: /v1/health
-            Method: GET
-      # No explicit Policies block: this function needs nothing beyond the
-      # AWSLambdaBasicExecutionRole SAM attaches by default (CloudWatch Logs only).
-      # Every later function that touches DynamoDB/S3 gets its own scoped Policies —
-      # never a shared "app role" (docs/04-SECURITY-RULES.md §4).
+            Path: $default
+            Method: ANY
 
 Outputs:
   HttpApiUrl:

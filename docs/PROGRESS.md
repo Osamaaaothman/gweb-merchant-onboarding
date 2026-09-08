@@ -60,3 +60,61 @@ implementations, optimistic concurrency, `POST /v1/applications`, `GET /v1/appli
 Before that: resolve the runtime/language question above if at all possible — every
 phase after this one gets more expensive to port if it turns out .NET was the right
 call.
+
+---
+
+## 2026-09-09 (same day, later) — Runtime pivot: TypeScript → ASP.NET Core / .NET 10
+
+### What landed
+
+Osama answered the open runtime question from earlier the same day: **ASP.NET, and
+.NET 9** ("already installed on my device"). Before implementing, current AWS
+documentation was checked rather than assumed — .NET 9 on Lambda is container-image-
+only and deprecates 2026-11-10; .NET 10 is a managed runtime, also already installed
+locally, supported through 2028. Built on .NET 10 on that basis; flagged to Osama.
+
+- Entire TypeScript backend (`handlers/`, `shared/`, `config/`, `tests/*.ts`,
+  `tsconfig.json`, `eslint.config.js`, `jest.config.js`, `package.json`) **deleted**,
+  not left alongside the new code.
+- Reimplemented in C# on a new solution: `src/Gweb.Shared` (Clock, Deadline,
+  Correlation, Logging/Redactor, Errors), `src/Gweb.Config`, `src/Gweb.Api` (ASP.NET
+  Core Minimal API, hosted via `Amazon.Lambda.AspNetCoreServer.Hosting`), 53 xUnit
+  tests in `tests/Gweb.Tests` (99.6% line / 96.7% branch coverage, generated code
+  excluded).
+- `infra/template.yaml` rewritten: `Runtime: dotnet10`, **one** Lambda function
+  (`ApiFunction`) hosting the entire API behind a `$default` HTTP API route, rather
+  than one Lambda per route — a deliberate, documented deviation from
+  `docs/03-ARCHITECTURE-RULES.md` §1 (see ADR-0001).
+- ADR-0001 rewritten to record the actual decision and the architecture-rule
+  deviation; ADR-0002 corrected (no longer references esbuild/TypeScript).
+- **Docker Desktop installed and started** (via `winget`; the Windows service needed
+  one manual admin approval from Osama mid-session — noted for anyone else setting
+  this machine up).
+- **`sam local start-api` verified for real**, end to end, through an actual Docker
+  container running the `dotnet10` Lambda runtime emulation image — closing the gap
+  flagged at the end of the Phase 0–1 session. Caught and fixed a real mistake in the
+  process: pointing `sam local` at the source template instead of
+  `.aws-sam/build/template.yaml` produces a `502` for a compiled runtime (nothing to
+  mount at `/var/task`). See README "Prerequisites and local setup" for the corrected
+  command and why it matters.
+
+### Blocked on Osama
+
+1. **AWS account/region/profile/billing limit, AI provider credential, GitHub repo
+   visibility, time budget** — unchanged from the earlier entry above; still open.
+2. **Comprehension check for the Phase 0–1 primitives** was delivered before this
+   pivot; the C# reimplementation has **not** yet had its own comprehension check.
+   Given the whole backend was rewritten, treat the earlier check as void and redo it
+   against the actual C# code before Phase 2 starts.
+3. **`git push` still has not happened.** Everything remains local-only.
+4. **Whether ASP.NET's one-Lambda-for-the-whole-API shape is actually acceptable** —
+   ADR-0001 documents the IAM/cold-start tradeoff honestly, but Osama should
+   explicitly sign off on it (or ask for the per-bounded-context split described as
+   the production mitigation) before Phase 2 builds more routes onto this function.
+
+### What the next session should start with
+
+Same as above — Phase 2 — but now against the C# codebase. Also worth a few minutes
+first: confirm Osama has actually reviewed `src/Gweb.Shared/Deadline/DeadlineBudget.cs`
+and `src/Gweb.Shared/Logging/Redactor.cs`, since two full implementations of those now
+exist in git history and only the C# one is live.
