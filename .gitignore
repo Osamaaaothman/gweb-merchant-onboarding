@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+bin/
+obj/
+coverage/
+
+# Serverless / IaC build artifacts
+.aws-sam/
+cdk.out/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.pem
+
+# Personal prep (not a deliverable)
+docs/INTERVIEW-NOTES.md
