@@ -30,6 +30,12 @@ Be specific per area, not generic.
 | Config loader | Generated | *(Osama: fill in)* |
 | IaC (SAM template) | Generated for both the original TypeScript stack and the .NET rewrite; caught and fixed two real issues by actually running the tools rather than assuming (nodejs20.x already past its Lambda deprecation date; .NET 9 being container-image-only and deprecating 2026-11-10 on Lambda vs. .NET 10 as a managed runtime) | *(Osama: fill in)* |
 | Runtime/language rewrite (TS → ASP.NET Core/.NET 10) | Directed to do this by Osama mid-session; Claude removed the TypeScript backend entirely and reimplemented every Phase 0–1 primitive in C#, then verified the result with `dotnet test` and a real `sam local start-api` run through Docker | *(Osama: fill in — was this the right call, and could/should this have been avoided by confirming the runtime choice before Phase 0 started?)* |
+| DynamoDB access-pattern design | ADR-0003 written before any persistence code, per docs/03-ARCHITECTURE-RULES.md §4 | *(Osama: fill in)* |
+| Application domain entity + state machine | Generated `Application`/`ApplicationStatus`/`IApplicationRepository`; `Submit()` throws on an illegal transition rather than allowing it | *(Osama: fill in)* |
+| DynamoDB + in-memory repository implementations | Generated; found and fixed two real bugs by actually running the tests against them rather than trusting the first version (an exception-swallowing bug in the timeout wrapper, and a wrong assumption about AWSSDK v4's `IsItemSet` semantics for a missing item) | *(Osama: fill in)* |
+| Unit tests | Generated throughout; Moq introduced for the DynamoDB client boundary specifically (implementing the full `IAmazonDynamoDB` interface by hand was not worth it) | *(Osama: fill in)* |
+| Integration test | `HealthEndpointTests`/`ApplicationEndpointsTests` via `WebApplicationFactory<Program>` -- real HTTP through the real ASP.NET Core pipeline; the applications endpoints were also verified a second way, directly against a real (local) DynamoDB, not just the in-memory adapter | *(Osama: fill in)* |
+| IaC / IAM policies | `ApiFunction`'s `Policies:` block scoped to exactly `dynamodb:PutItem`/`dynamodb:GetItem` on the one table ARN -- extended, not widened, as Phase 3+ needs more actions | *(Osama: fill in)* |
 | Documentation (README, ADRs, this file's factual tables) | Generated | *(Osama: fill in)* |
 
 *(Osama: the "My involvement" column is intentionally blank — Claude should not write
@@ -128,6 +134,37 @@ repeated.
 
 ---
 
+**Issue:** `DynamoDbApplicationRepository`'s first version wrapped every AWS SDK call
+in one generic `catch (AmazonDynamoDBException)` that translated everything to
+`DependencyUnavailableException` -- including `ConditionalCheckFailedException`
+(a subtype), which should have become `ConflictException` instead. This was caught by
+actually running `CreateTranslatesAConditionalCheckFailureIntoConflictException` and
+watching it fail with the wrong exception type, not by inspection.
+**Why it mattered:** *(Osama: fill in — this is exactly the kind of bug that a test
+suite catches and a code review skim doesn't; does that change how much you trust the
+"it compiles and looks right" bar for reviewing AI output?)*
+**What I did:** *(Osama: fill in)*
+**Test added:** `CreateTranslatesAConditionalCheckFailureIntoConflictException` (the
+one that caught it) plus an exception filter (`when (ex is not ConditionalCheckFailedException)`)
+in `DynamoDbApplicationRepository.ExecuteAsync`.
+
+---
+
+**Issue:** A test simulating "item not found" set `GetItemResponse.Item = []` (empty
+dictionary). It failed with `KeyNotFoundException` instead of the expected null
+result -- because in AWSSDK v4, `GetItemResponse.IsItemSet` reflects whether `Item`
+was assigned at all, not whether it's non-empty, and a real "not found" response
+leaves `Item` as `null`. Confirmed against the installed package's own XML docs before
+fixing (not from memory).
+**Why it mattered:** The *production* code (`response.IsItemSet ? FromItem(...) : null`)
+was actually correct; the *test* was simulating AWS's behavior wrong. Easy to have
+shipped a passing-for-the-wrong-reason test if the assertion had been looser.
+**What I did:** *(Osama: fill in)*
+**Fix:** Changed the test fixtures to `Item = null`, with a comment explaining why,
+so the next person editing this test doesn't reintroduce the same wrong assumption.
+
+---
+
 ## 6. Errors and weaknesses I found in AI suggestions
 
 Categories worth watching for, with real examples from this project:
@@ -142,7 +179,12 @@ Categories worth watching for, with real examples from this project:
 - **Over-broad IAM** (`s3:*`, `Resource: "*"`) proposed by default — …
 - **Timeouts not propagated** — plausible-looking async code with no deadline threading — …
 - **Tests that cannot fail** — asserted on mock behavior rather than production code — …
-- **Silent error swallowing** in `catch` blocks — …
+- **Silent error swallowing** in `catch` blocks — the first version of
+  `DynamoDbApplicationRepository.ExecuteAsync` caught `AmazonDynamoDBException`
+  broadly enough to swallow `ConditionalCheckFailedException` before the caller's own
+  more specific handler ever saw it, turning an expected "already exists" conflict
+  into a generic "unavailable" error. Caught by a test, fixed with an exception
+  filter — full details in §5.
 - **PII leaking into logs or prompts** — …
 - **Invented MCC codes or a stale "high-risk MCC" list** instead of the real catalog — …
 - **Over-engineering** — abstractions with a single implementation and no reason to exist — …

@@ -1,18 +1,18 @@
-using Amazon.Lambda.AspNetCoreServer;
-using Amazon.Lambda.Core;
+using Amazon.DynamoDBv2;
+using Gweb.Adapters.Persistence;
+using Gweb.Api;
+using Gweb.Api.Applications;
 using Gweb.Config;
+using Gweb.Domain.Applications;
+using Gweb.Services.Applications;
 using Gweb.Shared.Clock;
-using Gweb.Shared.Correlation;
-using Gweb.Shared.Deadline;
-using Gweb.Shared.Errors;
 using Gweb.Shared.Logging;
-using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Hosts this whole app as one Lambda function behind API Gateway HTTP API. See
 // docs/adr/0001-runtime-and-language-choice.md for why this is one Lambda for the
-// whole API rather than one-per-route (the architecture doc's stated preference) —
+// whole API rather than one-per-route (the architecture doc's stated preference) --
 // it is the idiomatic way to run ASP.NET Core on Lambda, and the tradeoff is recorded
 // there, not silently accepted.
 builder.Services.AddAWSLambdaHosting(LambdaEventSource.HttpApi);
@@ -24,42 +24,38 @@ builder.Services.AddSingleton(config);
 builder.Services.AddSingleton<IClock, SystemClock>();
 builder.Services.AddSingleton(new StructuredLogger(Console.Out, config.LogLevel));
 
+// PERSISTENCE_PROVIDER=inmemory is for pure local dev without an AWS account; every
+// deployed environment uses dynamodb (the default), reading the table name IaC
+// injects. Swapping the adapter is a config change, never a code change -- see
+// docs/03-ARCHITECTURE-RULES.md §5.
+var persistenceProvider = Environment.GetEnvironmentVariable("PERSISTENCE_PROVIDER") ?? "dynamodb";
+if (string.Equals(persistenceProvider, "inmemory", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddSingleton<IApplicationRepository, InMemoryApplicationRepository>();
+}
+else
+{
+    var applicationsTableName = AppConfigLoader.RequireEnv("APPLICATIONS_TABLE_NAME", Environment.GetEnvironmentVariable);
+    // DYNAMODB_SERVICE_URL is unset in every deployed environment -- it exists only
+    // so local development/testing can point the real repository at DynamoDB Local
+    // instead of a mock, without any code change (docs/03-ARCHITECTURE-RULES.md §5).
+    var dynamoDbServiceUrl = Environment.GetEnvironmentVariable("DYNAMODB_SERVICE_URL");
+    var dynamoDbConfig = new AmazonDynamoDBConfig();
+    if (!string.IsNullOrWhiteSpace(dynamoDbServiceUrl))
+    {
+        dynamoDbConfig.ServiceURL = dynamoDbServiceUrl;
+    }
+    builder.Services.AddSingleton<IAmazonDynamoDB>(new AmazonDynamoDBClient(dynamoDbConfig));
+    builder.Services.AddSingleton<IApplicationRepository>(
+        sp => new DynamoDbApplicationRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
+}
+
+builder.Services.AddSingleton<ApplicationService>();
+
 var app = builder.Build();
 
-app.MapGet("/v1/health", (HttpContext httpContext, IClock clock, StructuredLogger logger, BaseConfig cfg) =>
-{
-    var correlationId = httpContext.Request.Headers.TryGetValue("x-correlation-id", out var headerValues)
-        ? headerValues.ToString()
-        : Guid.NewGuid().ToString();
-
-    return CorrelationScope.Run(new CorrelationContext(correlationId, "health"), () =>
-    {
-        try
-        {
-            var lambdaContext = httpContext.Items[AbstractAspNetCoreFunction.LAMBDA_CONTEXT] as ILambdaContext;
-            // Outside Lambda (e.g. `dotnet run` for local dev), there is no real
-            // ceiling — the hard ceiling constant is a reasonable stand-in so the
-            // budget still behaves sensibly rather than throwing.
-            var remainingMs = lambdaContext is not null
-                ? (long)lambdaContext.RemainingTime.TotalMilliseconds
-                : DeadlineBudget.HardCeilingMs;
-
-            var budget = DeadlineBudget.Start(remainingMs, clock, cfg.DeadlineTargetMs);
-
-            logger.Info("request_received");
-
-            var body = new { status = "ok", correlationId, remainingBudgetMs = budget.RemainingMs() };
-
-            logger.Info("request_completed", new { durationMs = budget.ElapsedMs() });
-
-            return Results.Json(body);
-        }
-        catch (Exception ex)
-        {
-            return HttpErrorMapper.Map(ex, logger);
-        }
-    });
-});
+app.MapGet("/v1/health", HealthEndpoint.GetHealthAsync);
+app.MapApplicationEndpoints();
 
 app.Run();
 

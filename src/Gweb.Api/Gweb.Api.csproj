@@ -3,6 +3,8 @@
   <ItemGroup>
     <ProjectReference Include="..\Gweb.Shared\Gweb.Shared.csproj" />
     <ProjectReference Include="..\Gweb.Config\Gweb.Config.csproj" />
+    <ProjectReference Include="..\Gweb.Services\Gweb.Services.csproj" />
+    <ProjectReference Include="..\Gweb.Adapters.Persistence\Gweb.Adapters.Persistence.csproj" />
   </ItemGroup>
 
   <ItemGroup>

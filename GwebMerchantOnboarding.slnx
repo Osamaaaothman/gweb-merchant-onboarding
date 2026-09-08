@@ -1,7 +1,10 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Gweb.Adapters.Persistence/Gweb.Adapters.Persistence.csproj" />
     <Project Path="src/Gweb.Api/Gweb.Api.csproj" />
     <Project Path="src/Gweb.Config/Gweb.Config.csproj" />
+    <Project Path="src/Gweb.Domain/Gweb.Domain.csproj" />
+    <Project Path="src/Gweb.Services/Gweb.Services.csproj" />
     <Project Path="src/Gweb.Shared/Gweb.Shared.csproj" />
   </Folder>
   <Folder Name="/tests/">
