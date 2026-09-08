@@ -1,0 +1,21 @@
+<Project>
+
+  <!-- Shared across every .NET project in this repo, so strictness can't drift between
+       one csproj and the next. Mirrors the TypeScript-era strict tsconfig + zero-warning
+       ESLint config this replaced. -->
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <AnalysisMode>Recommended</AnalysisMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- CA1716: "Shared" (mirroring the required shared/ folder from
+         docs/02-ENGINEERING-STANDARDS.md) trips this VB.NET-interop naming rule.
+         No VB.NET consumer will ever exist for this API; suppressing is correct here,
+         not a blanket "silence the analyzer" habit. -->
+    <NoWarn>CA1716</NoWarn>
+  </PropertyGroup>
+
+</Project>
