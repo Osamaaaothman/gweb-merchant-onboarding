@@ -1,0 +1,13 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The error taxonomy only. Domain must otherwise import nothing
+         infrastructure-shaped: no AWS SDK, no ASP.NET Core. -->
+    <ProjectReference Include="..\Gweb.Shared\Gweb.Shared.csproj" />
+  </ItemGroup>
+
+</Project>
