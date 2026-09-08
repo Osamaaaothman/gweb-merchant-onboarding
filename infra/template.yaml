@@ -126,9 +126,20 @@ Resources:
       Handler: Gweb.Api
       CodeUri: ../src/Gweb.Api/
       Description: Hosts the full ASP.NET Core Minimal API.
-      # No explicit Policies block yet: Phase 1 only has the health endpoint, which
-      # touches nothing beyond CloudWatch Logs. DynamoDB/S3 permissions get added
-      # here (scoped, never wildcard) as the endpoints that need them land.
+      Environment:
+        Variables:
+          APPLICATIONS_TABLE_NAME: !Ref ApplicationsTable
+      # Scoped to exactly the two operations Phase 2 uses (create + load an
+      # application), on this table only -- never dynamodb:*, never Resource: "*".
+      # Extend this list (never widen it to a wildcard) as later phases add
+      # Query/UpdateItem for people/documents/evaluation items.
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+              Resource: !GetAtt ApplicationsTable.Arn
       Events:
         Proxy:
           Type: HttpApi
