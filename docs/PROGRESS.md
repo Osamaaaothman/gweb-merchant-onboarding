@@ -118,3 +118,63 @@ Same as above — Phase 2 — but now against the C# codebase. Also worth a few 
 first: confirm Osama has actually reviewed `src/Gweb.Shared/Deadline/DeadlineBudget.cs`
 and `src/Gweb.Shared/Logging/Redactor.cs`, since two full implementations of those now
 exist in git history and only the C# one is live.
+
+---
+
+## 2026-09-09 (same day, later still) — Phase 2: application lifecycle & persistence
+
+Osama explicitly signed off on the one-Lambda-for-the-whole-API design (item 4 above,
+resolved) and chose to skip a fresh comprehension check in favor of moving straight to
+Phase 2 (item 2 above — still technically open, just deprioritized by Osama's own
+choice, not dropped by Claude).
+
+### What landed
+
+- ADR-0003 (single-table DynamoDB design, full access-pattern table), written before
+  any persistence code.
+- `Gweb.Domain`: `Application` aggregate with an explicit `Submit()` state-machine
+  guard, `IApplicationRepository`. Zero infrastructure imports beyond the shared error
+  taxonomy.
+- `Gweb.Adapters.Persistence`: `DynamoDbApplicationRepository` (conditional
+  `PutItem`/strongly-consistent `GetItem`, budget-derived per-call timeouts, AWS SDK
+  errors translated to the domain taxonomy without leaking internal messages) and
+  `InMemoryApplicationRepository`.
+- `Gweb.Services.ApplicationService` (create/get orchestration).
+- `POST /v1/applications`, `GET /v1/applications/{id}` — wired into the same
+  `RequestExecution` boilerplate the health endpoint now also uses (extracted during
+  this phase to avoid repeating it a third time).
+- `infra/template.yaml`: `ApiFunction` now has `APPLICATIONS_TABLE_NAME` and a
+  `Policies:` block scoped to exactly `dynamodb:PutItem`/`dynamodb:GetItem` on the one
+  table ARN.
+- 78 tests passing (up from 53), 96.4% line / 90.5% branch coverage.
+- **Two real bugs found by actually running tests, not by inspection** — full detail
+  in `AI-USAGE.md` §5: (1) a broad exception catch was swallowing
+  `ConditionalCheckFailedException` before the caller's specific handler saw it; (2) a
+  test's assumption about `GetItemResponse.IsItemSet` for a missing item was wrong
+  (production code was already correct).
+- **Verified twice, for real, against real backends:** `dotnet run` directly against
+  DynamoDB Local (full create/resume/404/400 flow, real HTTP, real DynamoDB API), and
+  `sam build`/`sam validate` for the updated template. `sam local start-api
+  --env-vars` for in-memory override was attempted and did **not** work as documented
+  in this environment — recorded as a known limitation in the README rather than
+  glossed over.
+
+### Blocked on Osama
+
+1. AWS account/region/profile/billing limit, AI provider credential, GitHub repo
+   visibility, time budget — still open, unchanged.
+2. `git push` still has not happened.
+3. Comprehension check for Phases 0–2 (all of it — the C# codebase has never had one)
+   — deferred at Osama's explicit choice, not forgotten. Should happen before this
+   goes much further; every phase adds more surface area to catch up on later.
+4. Whether the `sam local --env-vars` limitation is worth root-causing, or just living
+   with the documented `dotnet run` + DynamoDB Local workaround permanently.
+
+### What the next session should start with
+
+Phase 3 — Applicant & business intake (`feat/applicant-business-intake`): full data
+model from the brief §3.1/§3.2, schema validation (accept + reject cases), `PATCH
+/v1/applications/{id}/applicant` and `.../business`, beneficial owners/ownership
+percentage rules, masking of government ID/tax ID/bank metadata at capture, and the
+completeness calculation. This is where `Person`/`Business` domain entities (deferred
+from Phase 2 on purpose) actually get built, once their real fields are known.

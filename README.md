@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 1 — skeleton + cross-cutting primitives.** This README grows with
+> **Status: Phase 2 — application lifecycle & persistence.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -33,9 +33,17 @@ One ASP.NET Core Minimal API app, hosted as **one Lambda function** behind a sin
 deviation from the architecture rules' one-Lambda-per-route preference, justified in
 [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md).
 
+Application state lives in a **single DynamoDB table** (`gweb-applications-{stage}`),
+one item type per aggregate member under a shared `APP#{id}` partition key — see
+[`docs/adr/0003-dynamodb-table-strategy.md`](docs/adr/0003-dynamodb-table-strategy.md)
+for the full access-pattern table. Phase 2 implements the `Application` aggregate
+(create + resume) against it; Person/Document/Evaluation items land in later phases
+using the same table, no new IaC resource per entity.
+
 Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
-[`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md).
+[`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md),
+[`docs/adr/0003-dynamodb-table-strategy.md`](docs/adr/0003-dynamodb-table-strategy.md).
 
 ## Tech stack
 
@@ -49,7 +57,8 @@ ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runt
 | Documents | Amazon S3 (pre-signed uploads) |
 | AI evaluation | Mock adapter by default; real provider pluggable behind config |
 | Frontend | React + TypeScript + Vite **(TBD — Phase 11)** |
-| Testing | xUnit, coverlet |
+| Testing | xUnit, coverlet, Moq |
+| Persistence | Amazon.DynamoDBv2 SDK, single-table (`docs/adr/0003-dynamodb-table-strategy.md`) |
 
 **Why .NET 10 and not .NET 9:** .NET 9 on Lambda is container-image-only and AWS
 deprecates it 2026-11-10; .NET 10 is a fully managed (zip-deploy) runtime supported
@@ -110,6 +119,48 @@ the container (not the local-dev fallback constant in `Program.cs`), confirming 
 `AbstractAspNetCoreFunction.LAMBDA_CONTEXT` wiring is correct against the actual Lambda
 runtime emulator, not just against the WebApplicationFactory-based integration test.
 
+### Testing the `/v1/applications` endpoints against a real DynamoDB
+
+Two options, both real (neither is the `InMemoryApplicationRepository` mock):
+
+**A) Against DynamoDB Local**, without needing an AWS account at all:
+
+```bash
+docker run -d --name dynamodb-local -p 8000:8000 amazon/dynamodb-local:latest \
+  -jar DynamoDBLocal.jar -inMemory -sharedDb
+# create the table once (see docs/adr/0003-dynamodb-table-strategy.md for the schema:
+# pk/sk, both String, both required)
+
+PERSISTENCE_PROVIDER=dynamodb \
+APPLICATIONS_TABLE_NAME=gweb-applications-local \
+DYNAMODB_SERVICE_URL=http://localhost:8000 \
+AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local AWS_REGION=us-east-1 \
+dotnet run --project src/Gweb.Api
+
+curl -i -X POST http://localhost:5280/v1/applications
+curl -i http://localhost:5280/v1/applications/<id-from-the-response-above>
+```
+
+`DYNAMODB_SERVICE_URL` is read only in `Program.cs`'s DynamoDB branch and is unset in
+every deployed environment — it exists purely so the real repository code can be
+pointed at DynamoDB Local instead of AWS, with no code change.
+
+**Actually run, this session, against a real (local) DynamoDB** — not asserted:
+`POST /v1/applications` → `201` with `Location: /v1/applications/<id>`; `GET` on that
+ID → `200` with the same application; a second `POST` → a different ID; `GET` on a
+random well-formed UUID → `404 NOT_FOUND`; `GET /v1/applications/not-a-guid` → `400
+VALIDATION_FAILED`. Full request/response pairs are in this session's transcript.
+
+**B) `sam local start-api` with in-memory persistence**, no DynamoDB at all: pass
+`--env-vars` pointing at a JSON file setting `PERSISTENCE_PROVIDER=inmemory` for
+`ApiFunction`. **Known limitation, found and not yet resolved:** in this environment
+this override was confirmed *parsed* by the SAM CLI ("Environment variables data found
+for specific function in standard format") but did **not** actually change which
+branch `Program.cs` took at cold start — the request still hit the DynamoDB code path
+and failed with `503` (no real table reachable from inside the container). Option A
+above is the verified path for exercising the DynamoDB-backed flow through `sam
+local`; revisit option B if a real reason to use it comes up.
+
 ## Running tests
 
 ```bash
@@ -133,12 +184,38 @@ hand-written and shouldn't be judged as if it were.
 See [`.env.example`](.env.example) for the full list with descriptions. Copy it to
 `.env` for local development; `.env` is git-ignored and must never be committed.
 
-## API examples **(TBD — Phase 13, OpenAPI spec)**
+## API examples
+
+Full OpenAPI spec is **(TBD — Phase 13)**; these are real curl examples against the
+endpoints that exist so far (see also "Prerequisites and local setup" above for how to
+run them locally).
+
+```bash
+# Start a new application
+curl -i -X POST http://localhost:5280/v1/applications
+# -> 201, Location: /v1/applications/<id>, body: {"id":"...","status":"InProgress","version":1,...}
+
+# Resume it later
+curl -i http://localhost:5280/v1/applications/<id>
+# -> 200, same shape
+
+# Unknown (but well-formed) id
+curl -i http://localhost:5280/v1/applications/00000000-0000-0000-0000-000000000000
+# -> 404, {"error":{"code":"NOT_FOUND",...}}
+
+# Malformed id -- rejected at the boundary, never reaches DynamoDB
+curl -i http://localhost:5280/v1/applications/not-a-guid
+# -> 400, {"error":{"code":"VALIDATION_FAILED",...}}
+```
 
 ## Assumptions
 
-- No authentication/authorization is implemented in this prototype. Full detail and the
-  seam left for a real authorizer will be documented here once the API exists (Phase 2+).
+- No authentication/authorization is implemented in this prototype. `POST /v1/applications`
+  reads an optional `x-actor` header purely for the audit-field value (`createdBy`) --
+  it is not verified against anything, and any client can claim any actor name. The
+  seam for a real authorizer: replace that header read in
+  `src/Gweb.Api/Applications/ApplicationEndpoints.cs` with the identity API
+  Gateway/Cognito attaches to the request once one exists.
 
 ## Tradeoffs
 
@@ -163,13 +240,22 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 - **S3 CORS `AllowedOrigins` is `["*"]`.** Fine for local development against no fixed
   frontend origin yet; must be tightened to the real web app origin once one exists
   (Phase 11).
-- **DynamoDB table is a Phase-1 skeleton** (bare `pk`/`sk`, no GSIs). The real
-  access-pattern design and single- vs multi-table justification land in ADR-0003 in
-  Phase 2, before any application data is modeled against it.
 - **No authentication/authorization** — see Assumptions above.
 - **No AWS deployment executed.** Local-first per `docs/06-COLLABORATION-PROTOCOL.md`
   §3; a real `sam deploy` (and its teardown script) is scoped for Phase 13, contingent
   on Osama providing AWS account details.
+- **`sam local start-api --env-vars` does not actually override `Program.cs`'s
+  cold-start persistence-provider choice** in this environment — see "Testing the
+  `/v1/applications` endpoints" above for the real finding and the verified
+  workaround (`dotnet run` directly against DynamoDB Local). Root cause not
+  determined; a minor SAM CLI/managed-runtime interaction, not a bug in this repo's
+  code, but worth understanding before relying on that flag for anything else.
+- **Only the `Application` aggregate's envelope exists** (id, status, version, audit
+  fields) — no applicant/business/ownership fields yet. Those, and the
+  `Person`/`Business` PATCH endpoints, are Phase 3.
+- **`Application.Submit()` exists but is unreachable from the API** — no `POST
+  /v1/applications/{id}/submit` endpoint yet (Phase 9). The state-machine guard is
+  unit-tested directly against the domain type in the meantime.
 
 ## What is real vs. mocked
 
@@ -181,17 +267,25 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 ## Test coverage
 
 Measured by running `dotnet test --collect:"XPlat Code Coverage" --settings
-coverlet.runsettings` (last run: 53 tests, all passing; generated-code excluded per
+coverlet.runsettings` (last run: 78 tests, all passing; generated-code excluded per
 `coverlet.runsettings`):
 
 | Assembly | Line coverage | Branch coverage |
 |---|---|---|
-| `Gweb.Api` | 100% | — |
-| `Gweb.Config` | 100% | — |
-| `Gweb.Shared` | 99.3% | 96.7% |
-| **Overall** | **99.6%** | **96.7%** |
+| `Gweb.Domain` | 100% | 100% |
+| `Gweb.Services` | 100% | 100% |
+| `Gweb.Adapters.Persistence` | 100% | 100% |
+| `Gweb.Config` | 100% | 100% |
+| `Gweb.Shared` | 99.3% | 95.7% |
+| `Gweb.Api` | 88.2% | 50% |
+| **Overall** | **96.4%** | **90.5%** |
 
-This covers only what exists so far — `Gweb.Shared` primitives, the config loader, and
-the health endpoint. Numbers will be re-measured and reported per-phase as domain,
-service, policy, and adapter code is added; a stale global percentage from Phase 1
-will not be left standing in for what a later phase actually covers.
+`Gweb.Api`'s lower number is mostly `Program.cs`'s startup branching (choosing
+DynamoDB vs. in-memory, setting `DynamoDbConfig.ServiceURL`) — code that runs once at
+process start, before DI exists to inject a test double into, and is instead verified
+by actually running it (see "Prerequisites and local setup" above) rather than chased
+for coverage percentage. Not claiming that split is ideal, just accurate.
+
+This will keep being re-measured and reported per-phase as `policy/` and the rest of
+`adapters/` are added; a stale global percentage from an earlier phase is never left
+standing in for what a later phase actually covers.
