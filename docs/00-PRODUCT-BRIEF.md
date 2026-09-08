@@ -1,200 +1,256 @@
-# 00 — Product Brief
+# 00 — Project Brief
 
-Working summary of pinned product decisions. If this conflicts with a direct
-instruction from Osama, **flag the conflict — do not silently pick one.**
-
----
-
-## 1. What this is
-
-A commercial **ERP-Lite / accounting system** sold to businesses in **Saudi Arabia**
-first, then other Gulf markets (UAE, Oman later).
-
-- **Not** an internal system for one company — it is a product with many customers.
-- **General-purpose**, not industry-specific. Trade/distribution is the primary use
-  case today; manufacturing and retail are future tiers.
-- Serves **small, medium, and large** companies from one codebase — no separate
-  edition per size.
-- **Arabic and English from day one.** Full RTL and LTR. Not a later translation pass.
+Condensed, actionable version of the GWEB assessment. The original PDF is the source
+of truth; this file is the working summary. If they conflict, the PDF wins — and you
+must flag the conflict to Osama.
 
 ---
 
-## 2. Delivery model — **SaaS primary, single-tenant deployable**
+## Objective
 
-> **This supersedes the earlier "on-premise / single-tenant only" decision.**
-> Osama has confirmed the product is a **SaaS**.
+Build a **merchant onboarding processing layer** that:
+1. Collects applicant + business information with resumable state
+2. Accepts supporting documents
+3. Classifies the merchant using **Merchant Category Codes (MCC)**
+4. Produces an **explainable underwriting-assistance result**
+5. Emits a **normalized internal review payload** for later mapping to processor APIs
 
-### What that changes
-| Was (on-prem) | Now (SaaS) |
-|---|---|
-| One database per customer install | **Multi-tenant platform** — see `docs/03-MULTI-TENANCY-RULES.md` |
-| License key + activation middleware | **Subscription + entitlements**; license keys are obsolete for the SaaS path |
-| Customer runs upgrades | **We run migrations** across all tenants, zero-downtime |
-| Customer owns backups | **We own backup, restore, RPO/RTO, and data residency** |
-| Customer holds their own ZATCA keys | **We custody tenant cryptographic material** — a serious new security obligation |
-| Docker Compose per customer | Compose stays for local dev; production needs a real deployment target |
-
-### What is preserved
-The Gulf enterprise market still contains buyers who will demand an on-premise
-install. Therefore:
-
-- The application must remain **deployable as a single-tenant instance** with no code
-  changes — only configuration (`DEPLOYMENT_MODE=saas | single_tenant`).
-- This is achieved by making tenancy an **infrastructure concern behind one boundary**,
-  not by sprinkling `if (saas)` through the code.
-- In single-tenant mode there is exactly one tenant row; everything else is identical.
-
-**Do not build two codebases. Do not fork.**
+### Hard boundary
+This is an **intake and decision-support prototype**. It must never present itself as
+performing authoritative identity verification, credit decisions, sanctions screening,
+or final merchant approval. Mock all external providers where credentials are absent,
+and label mock output as mock in the response payload.
 
 ---
 
-## 3. Architecture pattern
+## Required user journey
 
-**Modular Monolith.** Not microservices. One deployable API, strong internal module
-boundaries.
-
-```
-repo/
-├── apps/
-│   ├── api/                 NestJS — composes all modules into one API
-│   └── web/                 React + TypeScript + Vite
-├── packages/
-│   ├── core/                Fixed platform — the five contracts live here
-│   ├── modules/
-│   │   ├── inventory/
-│   │   ├── purchasing/
-│   │   └── sales/
-│   ├── compliance/
-│   │   ├── contract/        The country-agnostic interface
-│   │   └── zatca-sa/        Saudi implementation
-│   ├── shared/              Money, dates, errors, result types, logging
-│   └── db/                  Prisma schema, migrations, seeds
-├── docker/
-└── docs/
-```
-
-Rationale for monolith over microservices: a financial ledger needs **transactional
-consistency across modules** (an invoice, its stock movement, and its journal entry
-must commit together). Distributed transactions here buy nothing and cost correctness.
+1. **Session** — create or resume an application by unique application ID; state persists
+2. **Individual / controller info** — applicant + beneficial owners / controlling persons
+3. **Corporate verification intake** — legal entity, registration IDs, ownership, addresses, business profile
+4. **Document upload** — registration evidence, IDs, licenses, bank evidence, optional processor statements
+5. **Business classification** — applicant self-selects activity → system proposes MCC + risk tags → applicant confirms or corrects
+6. **Rate & business evaluation** — if a processing statement exists, extract/accept rates and produce AI-assisted comparison; flag items needing manual review
+7. **Review & submit** — show all data, missing items, warnings, document status, proposed MCC, evaluation summary
+8. **Internal review payload** — normalized record for downstream mapping
 
 ---
 
-## 4. Core (fixed platform)
+## Minimum data model
 
-- Tree-structured **Chart of Accounts**, customisable per tenant
-- **Posting engine** — automatic double-entry
-- Multi-company / multi-branch, **multi-currency** with exchange rates
-- Central **permissions** at screen and action level
-- Configurable **approval workflows**
-- Full **audit trail** on every create/update/delete
-- Central, per-tenant configurable **document numbering**
-- Core financial reports: **balance sheet, income statement, cash flow**
-- *(SaaS additions — see §8)* tenant management, subscriptions/entitlements,
-  background job runner, notification service
+### Individual / control person
+- Legal first / middle (optional) / last name
+- Date of birth
+- Residential address: line1, line2, city, state/province, postal code, country
+- Email, phone
+- Role/title in business
+- Ownership percentage (if applicable)
+- Government ID **type + masked/last-four only** in metadata
+- Consent/attestation timestamps + version of terms accepted
 
----
-
-## 5. The five integration contracts (mandatory for every module)
-
-No module implements these itself. Ever.
-
-1. `IAccountingEngine` — modules request a posting; they never write to the ledger
-2. `IPermissionService` — same roles and users as Core
-3. `INumberingService` — every document gets its number from the central generator
-4. `IAuditLogger` — one mechanism for all audit records
-5. **Unified reporting layer** — module data appears in the general financial reports,
-   never in an isolated report
-
-Details and the module checklist: `docs/02-ARCHITECTURE-RULES.md`.
+### Business / legal entity
+- Legal business name + DBA / trade name
+- Entity type: LLC, corporation, partnership, sole proprietor, nonprofit, other
+- Formation country + state/province
+- Registration identifier: EIN / federal tax ID, state UBI / local registration number, or jurisdiction equivalent
+- Registered address + operating address
+- Website URL + customer-facing business description
+- Business start date
+- Volume profile: expected annual card volume, average ticket, highest ticket, monthly transaction count, card-present vs card-not-present mix, e-commerce percentage
+- Ownership / beneficial-owner structure + controlling persons
+- Settlement bank account **metadata only** — never raw online-banking credentials
+- Existing payment processor (if any) + optional processing history
 
 ---
 
-## 6. Scope — Tier 1 only
+## Documents
 
-### Inventory
-- Internal purchase request from inventory staff, status: pending / processed / rejected
-- Item ↔ warehouse binding, reorder point with automatic alert
-- Receive purchase orders → update quantity → post journal entry (inventory increase)
-- Inventory valuation — **PENDING DECISION** (FIFO vs weighted average). Design the
-  schema so it supports both; see `docs/01-OPEN-DECISIONS.md`
-- Stock count adjustments (physical vs book difference)
-
-### Purchasing
-- Receive purchase requests from Inventory
-- Supplier and price selection, with multi-supplier comparison later
-- Formal Purchase Order linked to supplier, item, price
-- Optional approval path above a configurable amount
-- On receipt: simplified **3-way matching** (PO ↔ receipt ↔ invoice) before final approval
-
-### Sales & Accounts Receivable
-- Customer request intake (manual for now) → **Quotation**
-- Quotation → Sales Order → **formal Invoice**
-- The invoice is part of the accounting cycle — **not a detached PDF**
-- The invoice passes through the compliance pack (ZATCA) before it is final
-- Email quotation/invoice as a **bilingual (AR/EN) PDF**
-- Collections tracking, customer statement, **aging report**
-
-### Compliance pack — ZATCA (Saudi Arabia)
-See `docs/06-COMPLIANCE-PACK-RULES.md`. Mandatory in Tier 1.
-
-### Tier 2 (not now)
-Full accounts payable, payroll, fixed assets, POS, UAE/Oman compliance packs.
-
-### Tier 3 (not now)
-Manufacturing/BOM, budgeting and financial planning, advanced BI, external integrations.
-
----
-
-## 7. Fixed tech stack — **do not propose alternatives**
-
-| Layer | Choice |
-|---|---|
-| Backend | **NestJS** (TypeScript, `strict`) |
-| ORM | **Prisma** |
-| Database | **PostgreSQL** |
-| Frontend | **React + TypeScript + Vite** |
-| UI library | **PrimeReact** (RTL support, DataTable/TreeTable for CoA and statements) |
-| State | **Zustand** (local UI state) + **TanStack Query** (server state) |
-| Forms | React Hook Form + **Zod** |
-| i18n | **i18next** |
-| Backend validation | class-validator / class-transformer |
-| Logging | **Pino** |
-| Local dev deployment | **Docker Compose** (api + db + web) |
-
----
-
-## 8. Additions required by the SaaS model
-
-These are **not** stack replacements — they are components the SaaS model requires that
-the original plan did not have. Each needs Osama's approval before it is introduced
-(`docs/13-COLLABORATION-PROTOCOL.md`):
-
-| Need | Why it is unavoidable | Proposed |
+| Document | Required? | Metadata to retain |
 |---|---|---|
-| Background job queue | ZATCA B2C reporting within 24h, retries with backoff, email sending, aging report generation, month-end jobs. HTTP requests cannot own these. | **BullMQ + Redis** |
-| Tenant provisioning pipeline | A new customer must get a schema, seeded CoA, admin user, numbering series, fiscal calendar — reproducibly | Core `tenant-provisioning` service |
-| Subscription & entitlements | Replaces the obsolete license-key mechanism; gates modules and limits per plan | Core `billing` module |
-| Secret custody for ZATCA keys | We now hold customers' cryptographic stamp private keys | KMS / envelope encryption — see `docs/09-SECURITY-RULES.md` §5 |
-| Backup / restore / PITR | We own customer financial data | Managed Postgres with PITR |
-| Observability | Multi-tenant incidents must be traceable to a tenant | Structured logs + metrics + traces, `tenantId` on everything |
-| Data residency | Saudi PDPL and customer procurement will ask where data lives | **PENDING DECISION** — see `docs/01-OPEN-DECISIONS.md` |
+| Government ID | Required for relevant individuals | type, owner, S3 key, checksum, status, uploaded_at, expires_at |
+| Business registration | Required | jurisdiction, identifier, S3 key, status |
+| Business license | Conditional | license type, issuer, masked number, expiry |
+| Bank evidence | Required | account holder, bank name, last4, statement date, S3 key |
+| Processing statement | Optional (drives rate evaluation) | processor, period, extracted metrics, confidence |
+| Additional underwriting evidence | Conditional | document category, reason requested, review status |
+
+### Upload rules
+- **Pre-signed S3 URLs.** Client uploads directly to S3. Never proxy document bodies through Lambda.
+- Allow at minimum PDF, JPG/JPEG, PNG. Validate MIME type, extension, size, and file signature (magic bytes) where practical.
+- Unique, non-guessable S3 keys. Bucket blocks public access, always.
+- Store SHA-256 checksum + upload timestamp (integrity + idempotency).
+- Lifecycle: `REQUESTED → UPLOADING → RECEIVED → PROCESSING → ACCEPTED | NEEDS_REVIEW | REJECTED`
+- Sensitive values are **never** written to logs. Mask IDs, tax identifiers, bank account numbers in logs and in UI after capture.
 
 ---
 
-## 9. Regional requirements that are easy to miss
+## MCC classification & risk policy
 
-Treat these as functional requirements, not polish:
+**Core design rule: MCC taxonomy and risk policy are two separate things.** Risk
+policy must be changeable without touching the catalog.
 
-- **Timezone:** `Asia/Riyadh` default per tenant; all timestamps stored in UTC,
-  rendered in tenant timezone. Fiscal period boundaries use **tenant local time**.
-- **Hijri calendar:** Saudi business documents commonly show both Gregorian and Hijri
-  dates. Store Gregorian; render both. Do not compute Hijri by hand — use a library.
-- **Arabic-Indic numerals** (٠١٢٣): a display preference, never a storage format.
-- **Arabic is legally required on Saudi tax invoices.** The invoice PDF and the ZATCA
-  XML must carry Arabic content, regardless of the user's UI language.
-- **VAT:** standard rate, zero-rated, exempt, and out-of-scope are **different**
-  treatments with different ledger and reporting consequences. Model them as distinct
-  tax treatment codes, never as "rate = 0".
-- **Currency:** SAR base for Saudi tenants, but multi-currency is Core. Every foreign
-  currency transaction stores the amount, the currency, the rate used, **and the rate
-  date** — the rate is snapshotted at transaction time, never re-derived later.
+- Import or seed a **real MCC dataset** (see Reference sources below). Do not invent codes.
+- Ship a script or documented process to refresh the dataset.
+- Risk is a **configurable policy attribute** — e.g. `standard`, `enhanced-review`,
+  `restricted/unsupported`. Never hard-label an MCC as universally "high risk."
+- Support **provider-specific overrides** — different acquirers apply different policy
+  to the same MCC.
+- Demonstrate enhanced-review logic for financial / quasi-cash / security-related
+  activity. Mastercard documentation calls out MCC **6012, 6051, 6211** for certain
+  specialized purchase types.
+- Persist **both** the applicant-selected activity **and** the system-proposed MCC so
+  reviewers can inspect mismatches.
+- **Never auto-approve a merchant because a model labelled it low risk.**
+
+---
+
+## AI-assisted evaluation layer
+
+Must work through an adapter with a mock implementation when no credentials exist.
+The **interface and failure behavior must be production-minded**, even in mock mode.
+
+Capabilities:
+- **Business profile summary** — what they sell, sales channel, geography, fulfillment model, recurring/subscription behavior, customer type
+- **MCC suggestion** — candidate MCCs + confidence + short explanation, from structured fields + description
+- **Statement extraction** — normalize processor, monthly volume, discount/effective rate, transaction fees, monthly fees, chargeback fees, statement period
+- **Current-rate analysis** — transparent effective processing cost. **Deterministic arithmetic must be separated from AI commentary.**
+- **Risk signals** — contradictions, missing evidence, unusually high ticket, description/MCC mismatch, incomplete ownership data, regulated-license claims without evidence
+
+Rules:
+- **Every warning must cite the input field or document that caused it.** No unexplained flags.
+- **AI output is untrusted structured input.** Validate against a schema, impose token/size limits, enforce timeouts, fall back safely.
+
+---
+
+## AWS architecture
+
+| Layer | Service | Expectation |
+|---|---|---|
+| Client | Web UI (your choice) | Multi-step form, upload progress, resume, validation, final review |
+| API ingress | API Gateway (recommended) | REST or HTTP API in front of Lambda; document routes + auth assumptions |
+| Compute | **AWS Lambda — required** | Stateless handlers, bounded execution, retries, idempotency |
+| State | **DynamoDB — required** | Application, person/entity, document metadata, status, MCC/evaluation records |
+| Objects | **S3 — required** | Private, pre-signed direct upload, documented lifecycle/versioning |
+| AI/external | Lambda adapter | Strict timeout budget, schema validation, mockable |
+| Secrets | Secrets Manager / SSM | No keys in source |
+| Observability | CloudWatch | Structured logs, correlation/application ID, metrics, failures, no raw sensitive values |
+
+---
+
+## The 45-second rule (15 rubric points — treat as a first-class feature)
+
+- Every synchronous API operation returns within **45 seconds**, including S3 and
+  external handshakes.
+- Set an internal deadline of **≤ 35 seconds** to leave headroom for cleanup and
+  response serialization.
+- Set **explicit downstream timeouts**. Never wait indefinitely on AI, storage, or a
+  third party.
+- If a workflow can exceed the budget, convert it to an **asynchronous state
+  transition** (`RECEIVED → PROCESSING`) and let the client poll a status endpoint.
+  Each individual poll is still bound by the 45-second rule.
+- Never hold Lambda open while a user uploads a file — pre-signed URL only.
+- Bounded retries with backoff + jitter, **only when the remaining deadline permits**.
+- Return a clear timeout/error state and preserve enough workflow state for safe retry.
+- **Required deliverable:** at least one test where a mocked dependency hangs or
+  responds slowly, and the function exits safely before the hard limit.
+
+---
+
+## API surface (naming flexible, behavior is not)
+
+```
+POST   /applications
+GET    /applications/{id}
+PATCH  /applications/{id}/applicant
+PATCH  /applications/{id}/business
+POST   /applications/{id}/documents/presign
+POST   /applications/{id}/documents/{documentId}/complete
+GET    /mcc?query=...
+POST   /applications/{id}/classify
+POST   /applications/{id}/evaluate
+GET    /applications/{id}/evaluation
+POST   /applications/{id}/submit
+```
+
+---
+
+## DynamoDB expectations
+
+- Choose **and document** single-table vs multi-table. Reviewers care about access
+  patterns and consistency, not fashion.
+- Idempotent writes via request IDs / conditional writes.
+- Optimistic concurrency (version field) to prevent silent overwrites.
+- Document at minimum these access patterns:
+  load application · list people/owners · list documents · fetch current evaluation ·
+  find submission status · query MCC catalog (DynamoDB or packaged static data, if justified)
+- No document blobs in DynamoDB.
+
+---
+
+## Acceptance criteria (must all pass)
+
+- [ ] Backend compute is Lambda-only
+- [ ] S3 for documents, DynamoDB for metadata/workflow state
+- [ ] No synchronous request exceeds 45s; slow-dependency behavior demonstrated
+- [ ] Applicant + business + ownership data can be entered, validated, saved, resumed, reviewed
+- [ ] Documents upload securely with metadata and lifecycle state
+- [ ] Business type self-selected; MCC suggested from a **real** catalog
+- [ ] Risk policy configurable and separated from MCC taxonomy
+- [ ] AI/rate evaluation returns structured, explainable output and fails safely
+- [ ] Submission blocks on missing required items; produces normalized review payload when complete
+- [ ] Tests, documentation, deployment instructions, no-real-PII fixtures included
+
+---
+
+## Deliverables
+
+1. **Source repository** — app code, tests, IaC, seeding/import utilities, fixtures
+2. **Runnable demo** — deployed endpoint OR reproducible local Lambda/API simulation + deploy instructions
+3. **Architecture document** — one diagram + explanation of request flow, S3 upload path, DynamoDB state, AI/external calls, timeouts, retries, failure states
+4. **API documentation** — OpenAPI/Swagger, Postman collection, or equivalent
+5. **MCC implementation** — seed/import source, search behavior, self-selected mapping, proposed-MCC workflow, configurable risk-policy example
+6. **Test evidence** — automated test output + note demonstrating ≤45s timeout behavior
+7. **Security note** — threat/abuse considerations, IAM approach, logging/redaction decisions, production improvements
+8. **Demo walkthrough** — concise start-to-submission walkthrough
+9. **`AI-USAGE.md`** — see the template in the repo root
+10. **Full, unsquashed git history**
+
+---
+
+## Bonus (only after all "must pass" items are green)
+
+Accessible polished form UX with save/resume · document OCR with confidence + manual
+correction · rule-versioning for processor-specific policy · duplicate-application
+detection via non-sensitive fingerprints · event-driven async evaluation preserving the
+45s sync boundary · rate comparison cleanly separating known values / calculated
+metrics / model interpretation · reviewer admin screen with risk flags, document status,
+data provenance, reason codes.
+
+---
+
+## Reference sources (use current official docs, not stale third-party lists)
+
+- Visa Merchant Data Standards Manual — public MCC listing and definitions
+  `https://usa.visa.com/content/dam/VCOM/download/merchants/visa-merchant-data-standards-manual.pdf`
+- Mastercard Rules / Compliance Programs
+  `https://www.mastercard.com/us/en/business/support/rules.html`
+- Mastercard Gateway documentation — 4-digit MCC, specialized purchase types (6012, 6051, 6211)
+- AWS Lambda / S3 / DynamoDB / API Gateway docs — limits, IAM, presigned uploads, retries, timeouts
+
+---
+
+## Client's explicit evaluation notes (from the email)
+
+> Looking especially closely at: code quality, structure, readability, maintainability ·
+> architecture and technical decision-making · security and data-handling practices ·
+> API and backend design · testing and error handling · ability to follow the Lambda /
+> S3 / DynamoDB / 45-second constraints · documentation of assumptions, tradeoffs, and
+> incomplete portions.
+
+> AI tools are encouraged. The goal is whether the candidate can use AI effectively
+> while still understanding, reviewing, testing, and taking responsibility for the
+> resulting code.
+
+> Submit a GitHub repository link. Preserve normal commit history — do not squash into
+> a single final commit. Meaningful commits showing fixes, refactoring, testing, and
+> architectural changes are expected.
