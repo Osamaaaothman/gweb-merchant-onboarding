@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\src\Gweb.Api\Gweb.Api.csproj" />
     <ProjectReference Include="..\..\src\Gweb.Domain\Gweb.Domain.csproj" />
     <ProjectReference Include="..\..\src\Gweb.Adapters.Persistence\Gweb.Adapters.Persistence.csproj" />
+    <ProjectReference Include="..\..\src\Gweb.Services\Gweb.Services.csproj" />
   </ItemGroup>
 
 </Project>
