@@ -13,10 +13,7 @@
 
 | Tool | Model | Used for |
 |---|---|---|
-| Claude Code (CLI) | *record the exact model string from `/status`* | Implementation, refactoring, tests, documentation |
-| *(add others)* | | |
-
-*(Record versions and the date range of use. If the model changed mid-project, note it.)*
+| Claude Code (CLI) | claude-sonnet-5 | Implementation, refactoring, tests, documentation (Phases 0–1, 2026-09-08/09) |
 
 ---
 
@@ -26,19 +23,17 @@ Be specific per area, not generic.
 
 | Area | AI involvement | My involvement |
 |---|---|---|
-| Project structure & layering | | |
-| DynamoDB access-pattern design | | |
-| Deadline/timeout primitive | | |
-| Document presign + validation | | |
-| MCC catalog import & search | | |
-| Risk policy engine | | |
-| AI evaluation adapter | | |
-| Rate arithmetic | | |
-| Unit tests | | |
-| Integration test | | |
-| IaC / IAM policies | | |
-| Frontend | | |
-| Documentation | | |
+| Repo scaffolding (tsconfig/eslint/jest/CI) | Generated all config files and resolved TS6/ESLint10 config-breakage from version drift (moduleResolution deprecation, isolatedModules requirement) | *(Osama: describe what you reviewed/changed)* |
+| Deadline/timeout primitive | Generated `DeadlineBudget`/`IClock`/`FakeClock` and their tests | *(Osama: fill in)* |
+| Structured logger + redaction | Generated `redact()`, the logger, and the "fully populated fixture" security test | *(Osama: fill in)* |
+| Domain error taxonomy + HTTP mapper | Generated | *(Osama: fill in)* |
+| Config loader | Generated | *(Osama: fill in)* |
+| IaC (SAM template) | Generated; also caught and fixed a real issue via `sam validate --lint` (nodejs20.x already past its update-deprecation date) | *(Osama: fill in)* |
+| Documentation (README, ADRs, this file's factual tables) | Generated | *(Osama: fill in)* |
+
+*(Osama: the "My involvement" column is intentionally blank — Claude should not write
+this in your voice. Fill it in with what you actually reviewed, questioned, or would
+change.)*
 
 ---
 
@@ -46,7 +41,7 @@ Be specific per area, not generic.
 
 | Component | Substantially AI-generated | Primarily written by me | Notes |
 |---|---|---|---|
-| `src/...` | ☐ | ☐ | |
+| `shared/`, `config/`, `handlers/health.ts`, `infra/template.yaml` (Phases 0–1) | ☑ | ☐ | Everything in Phases 0–1 was Claude-authored, under a fast-moving "just build it" instruction rather than a design-first-then-implement flow. That is a fact worth being honest about in the interview — see the comprehension check in `docs/PROGRESS.md`. |
 
 Be honest and granular. The client stated explicitly that they do **not** penalize more
 AI use — they penalize inability to evaluate and own the output.
