@@ -404,3 +404,47 @@ the catalog before Phase 6 needs them. Coverage: 92.6%/84.7% overall (flat vs. P
 
 Merged to `main` with `--no-ff`, pushed, per the same standing authorization as every
 phase since Phase 3.
+
+---
+
+## 2026-09-09 (same day, continued) — Docker unblocked; real live verification closed two long-standing gaps
+
+Osama ran `Start-Service com.docker.service` himself from an elevated PowerShell (the
+manual step this repo's notes have flagged as blocking since Phase 3) and confirmed
+`docker ps` worked. Used the window to close verification gaps that had been carried
+as documented-but-not-closed for multiple phases, rather than just resuming Phase 6.
+
+**`sam build` + `sam local start-api`, actually run against the real `dotnet10` Lambda
+runtime container** (first run pulled the image fresh — "Building image..." took a few
+minutes, confirmed genuine, not cached): `GET /v1/health` and `GET /v1/mcc?query=...`
+both returned real `200`s from inside the container, not `WebApplicationFactory`.
+
+**DynamoDB Local, spun up for real** (`docker run amazon/dynamodb-local`), table
+created via a small throwaway console tool (`AWSSDK.DynamoDBv2`, not the AWS CLI --
+not installed in this environment) against `http://localhost:8000`. Then, running the
+app directly (`dotnet run --project src/Gweb.Api` with `PERSISTENCE_PROVIDER=dynamodb`
++ `DYNAMODB_SERVICE_URL`, the previously-verified-working path since `sam local
+--env-vars` still doesn't override the persistence branch):
+
+- Full application journey against the **real** table: create → resume → PATCH
+  applicant (government ID masked to last4, persisted) → PATCH business (persisted) →
+  GET full aggregate (both present, completeness correct) → presign a document (real
+  `Document` row written, real SigV4-signed presign policy generated) → complete
+  against a bucket that doesn't actually exist, correctly returning `503
+  DEPENDENCY_UNAVAILABLE` rather than silently succeeding.
+- 404 on an unknown application, 400 on a malformed GUID -- both still correct against
+  the real table.
+
+**This closes:** "Phase 3's Applicant/Business repositories were not verified against
+a live DynamoDB Local" (closed -- they now have been, for real) and "Phase 4's
+Document repository was never live-verified at all" (closed the same way, first time).
+
+**Still open, honestly:** no actual byte has ever been uploaded through a presigned
+URL to a real or local-S3-compatible bucket in this session -- that's the one part of
+the document flow that remains verified only against a mocked `IAmazonS3`, not a live
+one. Updated README's Known Gaps to reflect exactly this, replacing the older, now-stale
+"not verified" entries rather than leaving them standing next to the new evidence.
+
+Cleaned up afterward: stopped the `dotnet run` process, stopped and removed the
+`dynamodb-local` container, left `sam local start-api` process to exit on its own.
+Nothing left running that outlives this session.

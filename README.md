@@ -176,31 +176,33 @@ curl -i http://localhost:5280/v1/applications/<id-from-the-response-above>
 every deployed environment — it exists purely so the real repository code can be
 pointed at DynamoDB Local instead of AWS, with no code change.
 
-**Actually run against a real (local) DynamoDB** (Phase 2, `Application` only): `POST
-/v1/applications` → `201` with `Location: /v1/applications/<id>`; `GET` on that ID →
-`200` with the same application; a second `POST` → a different ID; `GET` on a random
+**Actually run against a real (local) DynamoDB — full journey, re-verified 2026-09-09
+once Docker was available again:** `POST /v1/applications` → `201`; `GET` on that ID →
+`200` with the same application (resume); `PATCH .../applicant` → `200`, government ID
+masked to last4 in the response, persisted for real; `PATCH .../business` → `200`,
+persisted; `GET /v1/applications/{id}` afterward returns the full aggregate with both,
+completeness correctly listing only the fields still missing; `POST .../documents/presign`
+→ `201`, a real `Document` row written to the same live table, plus a genuinely
+SigV4-signed presigned-POST policy (local signing, no network call, so it succeeds even
+without a real bucket); `POST .../complete` against that same (non-existent-in-this-run)
+S3 bucket correctly returns `503 DEPENDENCY_UNAVAILABLE` rather than silently
+succeeding — proving the error-mapping path, not just the happy path. `GET` on a random
 well-formed UUID → `404 NOT_FOUND`; `GET /v1/applications/not-a-guid` → `400
-VALIDATION_FAILED`.
+VALIDATION_FAILED`. This closes the gap noted in earlier phases ("Phase 3's
+`Applicant`/`Business` repositories were not re-verified against a live DynamoDB
+Local") — they now have been, along with Phase 4's `Document` repository, which hadn't
+been live-verified even once before. What's still **not** verified live: an actual
+byte upload through the presigned URL to a real S3 bucket (no local S3-compatible
+service was set up for this) — see "Known gaps."
 
-**Phase 3's `Applicant`/`Business` DynamoDB repositories were not re-verified against
-a live DynamoDB Local** — Docker's Windows service needed re-approval mid-session and
-that wasn't blocked on further. What *is* verified for real: `sam build` (a real
-`dotnet publish` including the new repositories), and every `DynamoDbApplicantRepositoryTests`
-/ `DynamoDbBusinessRepositoryTests` round-trips through a fake in-memory
-`IAmazonDynamoDB` built from the exact same AWS SDK request/response types the real
-client uses — proving `ToItem`/`FromItem` are inverses for every field, including the
-nested address/volume-profile/beneficial-owner maps and lists. That is real evidence,
-just not the same as a live call. Worth actually running once Docker is available.
-
-**B) `sam local start-api` with in-memory persistence**, no DynamoDB at all: pass
-`--env-vars` pointing at a JSON file setting `PERSISTENCE_PROVIDER=inmemory` for
-`ApiFunction`. **Known limitation, found and not yet resolved:** in this environment
-this override was confirmed *parsed* by the SAM CLI ("Environment variables data found
-for specific function in standard format") but did **not** actually change which
-branch `Program.cs` took at cold start — the request still hit the DynamoDB code path
-and failed with `503` (no real table reachable from inside the container). Option A
-above is the verified path for exercising the DynamoDB-backed flow through `sam
-local`; revisit option B if a real reason to use it comes up.
+**B) `sam local start-api`** — also re-verified for real this session, including a
+genuine cold `Building image...` pull of the `dotnet10` Lambda runtime image (several
+minutes the first time; instant afterward). `GET /v1/health` and `GET /v1/mcc?query=...`
+both returned real `200`s from inside the actual Lambda runtime emulator container, not
+just `WebApplicationFactory`. **Still open, not re-tested this session:** the earlier
+finding that `--env-vars` (for forcing `PERSISTENCE_PROVIDER=inmemory` inside the
+container) is parsed by the SAM CLI but does not change which branch `Program.cs` takes
+at cold start. Option A above remains the verified path for the DynamoDB-backed flow.
 
 ## Running tests
 
@@ -354,15 +356,19 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   to validate size but never states a ceiling. Generous enough for a scanned PDF or
   phone photo, bounded so a single upload stays well clear of Lambda's own memory/payload
   limits. Trivial to change; it is one named constant, read from nowhere else.
-- **Phase 4's S3 code was not verified against a live AWS S3 bucket** in this session —
-  same situation as Phase 3's DynamoDB repositories (see below): what *is* verified is
-  `sam build` (real `dotnet publish` including `Gweb.Adapters.Storage`), `sam validate --lint`
-  on the updated IAM policy, and `S3DocumentStorageTests` round-tripping through a
-  mocked `IAmazonS3` built from the real AWS SDK request/response types — confirming
-  `CreatePresignedPostRequest`/`S3PostCondition`/`GetObjectMetadataRequest.ChecksumMode`/
-  `GetObjectRequest.ByteRange` are shaped exactly as the code assumes (checked against
-  the installed SDK's own XML docs, not memory). Worth an actual `sam local start-api`
-  + real S3 bucket run once Docker and an AWS account/profile are both available.
+- **No real S3 bucket has ever received an actual uploaded byte in this session.**
+  What *is* now verified live (2026-09-09, once Docker was available): `sam build`
+  (real `dotnet publish` including `Gweb.Adapters.Storage`), a real `sam local
+  start-api` run through the actual `dotnet10` Lambda runtime container,
+  `POST .../documents/presign` against live DynamoDB Local producing a genuinely
+  SigV4-signed presigned-POST policy (real local signing, no network call needed to
+  succeed), and `POST .../complete` against a non-existent bucket correctly returning
+  `503 DEPENDENCY_UNAVAILABLE` rather than silently succeeding. What remains
+  unverified: an actual multipart/form-data upload landing in a real (or local
+  S3-compatible) bucket and `complete()`'s checksum/signature verification succeeding
+  against it. `S3DocumentStorageTests` covers that logic against a mocked `IAmazonS3`
+  built from the real SDK's request/response types; worth an actual end-to-end upload
+  once an AWS account/profile (or a local S3-compatible service) is available.
 - **IAM policies are unverified against real AWS.** `sam validate --lint` confirms the
   template is well-formed, but nothing in this repo actually exercises whether
   `ApiFunction`'s policy grants exactly the right actions end-to-end. This session
@@ -378,9 +384,10 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 - **`sam local start-api --env-vars` does not actually override `Program.cs`'s
   cold-start persistence-provider choice** in this environment — see "Testing the
   `/v1/applications` endpoints" above for the real finding and the verified
-  workaround (`dotnet run` directly against DynamoDB Local). Root cause not
-  determined; a minor SAM CLI/managed-runtime interaction, not a bug in this repo's
-  code, but worth understanding before relying on that flag for anything else.
+  workaround (`dotnet run` directly against DynamoDB Local, re-confirmed working
+  2026-09-09). Root cause not determined; a minor SAM CLI/managed-runtime interaction,
+  not a bug in this repo's code, but worth understanding before relying on that flag
+  for anything else.
 - **`Application.Submit()` exists but is unreachable from the API** — no `POST
   /v1/applications/{id}/submit` endpoint yet (Phase 9). The state-machine guard is
   unit-tested directly against the domain type in the meantime.
@@ -398,9 +405,6 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   are captured and required for `CompletenessChecker` to report the applicant
   complete, but nothing currently blocks any other action on their absence (that
   blocking is Phase 9's submission gate).
-- **Phase 3's DynamoDB-backed repositories were not verified against a live DynamoDB
-  Local** in this session (Docker needed re-approval) — see "Testing the
-  `/v1/applications` endpoints" above for exactly what was and wasn't verified.
 - **The MCC catalog's data source is a well-established public MCC reference, not the
   brief's named source (the paid/licensed Visa Merchant Data Standards Manual)** — this
   session has no access to that manual. Every code the assessment's acceptance
