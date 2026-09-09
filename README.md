@@ -1,8 +1,22 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 12 — integration test & end-to-end.** This README grows with
+> **Status: Phase 13 — documentation & IAM hardening.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
+
+## Deliverables, per the brief's §12
+
+| Deliverable | Where |
+|---|---|
+| Source repository | This repo -- `src/` (backend), `frontend/` (SPA), `tests/`, `infra/` (IaC) |
+| Runnable demo | [`docs/DEMO.md`](docs/DEMO.md) -- local reproduction; see "Deployment instructions" below for the (unexecuted, see Known Gaps) real-AWS path |
+| Architecture document + diagram | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| API documentation | [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3.0) |
+| MCC implementation | "Seeding / refreshing the MCC catalog" below, [`docs/adr/0004-mcc-catalog-storage.md`](docs/adr/0004-mcc-catalog-storage.md), [`docs/adr/0005-risk-policy-representation.md`](docs/adr/0005-risk-policy-representation.md) |
+| Test evidence | [`docs/TEST-EVIDENCE.md`](docs/TEST-EVIDENCE.md) |
+| Security note | [`docs/SECURITY.md`](docs/SECURITY.md) |
+| Demo walkthrough | [`docs/DEMO.md`](docs/DEMO.md) |
+| AI usage report | [`AI-USAGE.md`](AI-USAGE.md) |
 
 ## What this is
 
@@ -160,7 +174,7 @@ confirm → evaluate → submit, chained in one continuous run through the real 
 pipeline. See "Running tests" below and
 [`docs/adr/0011-end-to-end-journey-test.md`](docs/adr/0011-end-to-end-journey-test.md).
 
-Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
+Full architecture document with diagram: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
 [`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md),
 [`docs/adr/0003-dynamodb-table-strategy.md`](docs/adr/0003-dynamodb-table-strategy.md),
@@ -394,9 +408,64 @@ account) never appear unmasked anywhere, including in the final submit payload; 
 second submit on an already-submitted application correctly returns `409`, not a
 silent no-op or a second `200`.
 
-## Deployment instructions **(TBD — Phase 13)**
+## Deployment instructions
 
-## Cleanup / teardown **(TBD — Phase 13)**
+**Not executed against a real AWS account this session** — no AWS account was
+available (see Known Gaps). `sam validate --lint` and `sam build` (a real
+`dotnet publish` producing a self-contained Linux executable) have both been run for
+real; `sam deploy` has not. These are the commands a real deployment would use:
+
+```bash
+sam build -t infra/template.yaml -b .aws-sam/build
+
+# First deploy: --guided walks through stack name, region, and parameter values
+# interactively (Stage, DeadlineTargetMs, PresignTtlSeconds, AiProvider, GeminiModel,
+# AiApiKey -- leave AiApiKey empty to stay on the mock provider, no credentials
+# needed) and saves the answers to samconfig.toml for future non-interactive deploys.
+sam deploy --guided -t .aws-sam/build/template.yaml
+
+# Subsequent deploys, once samconfig.toml exists:
+sam deploy -t .aws-sam/build/template.yaml
+
+# The stack's HttpApiUrl output is the base URL for every API example below.
+aws cloudformation describe-stacks --stack-name <stack-name> \
+  --query "Stacks[0].Outputs[?OutputKey=='HttpApiUrl'].OutputValue" --output text
+```
+
+If `AiProvider=Gemini`, source `AiApiKey` from SSM Parameter Store instead of passing
+it as a plain CloudFormation parameter (even `NoEcho`'d) — see
+`docs/06-COLLABORATION-PROTOCOL.md` for the exact `aws ssm put-parameter` shape, and
+`docs/SECURITY.md` for why this matters. `infra/template.yaml`'s `AiApiKey` parameter
+is a documented simplification for a project that has never executed a real deploy,
+not the recommended production shape.
+
+## Cleanup / teardown
+
+```bash
+# CloudFormation cannot delete a non-empty S3 bucket -- empty it first (this also
+# removes every version, since the bucket has versioning enabled).
+aws s3api list-object-versions --bucket gweb-documents-<stage>-<account-id> \
+  --output json --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' > /tmp/versions.json
+aws s3api delete-objects --bucket gweb-documents-<stage>-<account-id> --delete file:///tmp/versions.json
+aws s3api list-object-versions --bucket gweb-documents-<stage>-<account-id> \
+  --output json --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' > /tmp/markers.json
+aws s3api delete-objects --bucket gweb-documents-<stage>-<account-id> --delete file:///tmp/markers.json
+
+# Then delete the stack -- removes the DynamoDB table, the now-empty S3 bucket, the
+# HTTP API, and the Lambda function together.
+sam delete --stack-name <stack-name>
+```
+
+DynamoDB's `PointInTimeRecoverySpecification` and the table itself are deleted with
+the stack (no `DeletionPolicy: Retain` is set — a deliberate choice for a disposable
+dev/assessment stack; a production stack would likely retain the table and rely on the
+data-retention/deletion design in `docs/SECURITY.md` instead of stack deletion).
+
+Local teardown (Docker containers used for live verification this session):
+
+```bash
+docker rm -f gweb-dynamodb-local gweb-minio 2>/dev/null
+```
 
 ## Environment variables
 
@@ -405,9 +474,11 @@ See [`.env.example`](.env.example) for the full list with descriptions. Copy it 
 
 ## API examples
 
-Full OpenAPI spec is **(TBD — Phase 13)**; these are real curl examples against the
-endpoints that exist so far (see also "Prerequisites and local setup" above for how to
-run them locally).
+Full OpenAPI 3.0 spec: [`docs/openapi.yaml`](docs/openapi.yaml) (every endpoint,
+request/response schema, and error shape -- importable into Swagger UI, Postman, or
+any OpenAPI-aware tool). These are real curl examples against the same endpoints (see
+also "Prerequisites and local setup" above for how to run them locally, and
+[`docs/DEMO.md`](docs/DEMO.md) for a concise start-to-submit walkthrough).
 
 ```bash
 # Start a new application
@@ -614,13 +685,17 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   more session time than remained after building the frontend that needed this
   verified.
 - **IAM policies are unverified against real AWS.** `sam validate --lint` confirms the
-  template is well-formed, but nothing in this repo actually exercises whether
-  `ApiFunction`'s policy grants exactly the right actions end-to-end. This session
-  caught one real reasoning error before it shipped (the S3 policy initially omitted
-  `s3:PutObject`, on the wrong assumption that a presigned POST needs no grant on the
-  signer's own role — see `AI-USAGE.md` §5) purely by re-reasoning about SigV4, not by
-  a test. A real `sam deploy` + actual presigned-upload round trip is the only way to
-  be fully sure the policy is both sufficient and not over-broad.
+  template is well-formed, and Phase 13's audit (`docs/SECURITY.md` "IAM approach")
+  confirmed every granted action is justified by an actual code path and nothing
+  broader (`UpdateItem`/`DeleteItem`/`Scan`/`s3:DeleteObject`/`ListBucket` are all
+  absent because nothing needs them) -- but neither of those is a live test that
+  `ApiFunction`'s policy grants exactly the right actions end-to-end against real AWS.
+  This session caught one real reasoning error before it shipped (the S3 policy
+  initially omitted `s3:PutObject`, on the wrong assumption that a presigned POST
+  needs no grant on the signer's own role — see `AI-USAGE.md` §5) purely by
+  re-reasoning about SigV4, not by a test. A real `sam deploy` + actual
+  presigned-upload round trip is the only way to be fully sure the policy is both
+  sufficient and not over-broad.
 - **No authentication/authorization** — see Assumptions above.
 - **No AWS deployment executed.** Local-first per `docs/06-COLLABORATION-PROTOCOL.md`
   §3; a real `sam deploy` (and its teardown script) is scoped for Phase 13, contingent
