@@ -353,3 +353,54 @@ prove.
 Merged to `main` with `--no-ff` per `docs/01-GIT-WORKFLOW.md`; pushed per Osama's
 standing authorization ("ok now lets contenue also make the merge and pushes i dont
 wat to see anything incomplete now").
+
+---
+
+## 2026-09-09 (same day, continued) — Phase 5 (MCC catalog) built and merged
+
+Osama: *"طيب كمل يلا ما معنا وقت بدنا ننجز"* (continue, no time, need to get this
+done) — proceeded straight into Phase 5 with no phase-confirmation gate, consistent
+with the standing delegation-of-judgment preference from earlier this session.
+
+**Real decision made without asking (per that standing preference), logged here for
+the record:** the brief names the Visa Merchant Data Standards Manual as the MCC
+source. That's a paid/licensed document with no access from this session. Used the
+well-established public MCC taxonomy instead (the same code/description pairs recur
+across Visa/Mastercard/IRS references since the networks converged on one shared list
+decades ago) and flagged the substitution explicitly in `docs/adr/0004-mcc-catalog-storage.md`
+and the README, rather than either blocking on it or silently pretending it was the
+licensed source.
+
+**What got built:**
+- `IMccCatalog`/`MccCode` (`Gweb.Domain.Mcc`) -- deliberately synchronous, no
+  `DeadlineBudget` parameter, unlike every other repository interface in this codebase.
+  Reasoning logged in the interface's own doc comment: it's an in-memory lookup with
+  no I/O, so a budget parameter would be ceremony, not correctness.
+- `tools/McCatalogImport` -- a real, runnable console tool that validates
+  (4-digit codes, non-empty fields, no duplicates, fails loudly with the line number on
+  any violation) and regenerates the packaged catalog from a checked-in pipe-delimited
+  source file. Actually run against the 276-row source file this session, not just
+  described -- "Wrote 276 MCC codes" with zero validation failures.
+- `StaticMccCatalog` (`Gweb.Adapters.Mcc`) -- embedded-resource JSON, loaded once at
+  cold start, in-memory ranked search (exact code, then code-prefix, then
+  description-substring).
+- `McCatalogService` + `GET /v1/mcc?query=...&limit=...`.
+- No `infra/template.yaml` change needed -- no new AWS resource, since the catalog
+  isn't DynamoDB-backed (justified in ADR-0004, not a default).
+
+**One real test bug caught by actually running the suite:** a test asserted searching
+`"GAMBLING"` would find MCC 7995. It failed -- 7995's real description says "Betting...
+Casino Gaming..." and never contains the word "gambling" (that word only lives in the
+Category grouping, which `Search` deliberately doesn't match against). Production code
+was right; the test's assumed search term wasn't. Fixed the test's query to `"CASINO"`.
+Full detail in `AI-USAGE.md` §5.
+
+**Verified for real:** `dotnet build` (0 warnings/errors), `dotnet test` -- 238/238
+passing (up from 215), including
+`StaticMccCatalogTests.ContainsEveryMccThePhase6RiskPolicyMustBeAbleToClassify` proving
+6012/6051/6211 (the three codes Phase 6's risk policy demo depends on) are actually in
+the catalog before Phase 6 needs them. Coverage: 92.6%/84.7% overall (flat vs. Phase
+4's 92.4%/84.4%).
+
+Merged to `main` with `--no-ff`, pushed, per the same standing authorization as every
+phase since Phase 3.

@@ -1,16 +1,20 @@
 using System.Text.Json.Serialization;
 using Amazon.DynamoDBv2;
 using Amazon.S3;
+using Gweb.Adapters.Mcc;
 using Gweb.Adapters.Persistence;
 using Gweb.Adapters.Storage;
 using Gweb.Api;
 using Gweb.Api.Applications;
 using Gweb.Api.Documents;
+using Gweb.Api.Mcc;
 using Gweb.Config;
 using Gweb.Domain.Applications;
 using Gweb.Domain.Documents;
+using Gweb.Domain.Mcc;
 using Gweb.Services.Applications;
 using Gweb.Services.Documents;
+using Gweb.Services.Mcc;
 using Gweb.Shared.Clock;
 using Gweb.Shared.Logging;
 
@@ -86,6 +90,11 @@ else
         sp => new S3DocumentStorage(sp.GetRequiredService<IAmazonS3>(), documentsBucketName));
 }
 
+// Packaged static data (see docs/adr/0004-mcc-catalog-storage.md) -- not gated by
+// PERSISTENCE_PROVIDER at all, since it involves no AWS resource in either branch.
+builder.Services.AddSingleton<IMccCatalog, StaticMccCatalog>();
+builder.Services.AddSingleton<McCatalogService>();
+
 builder.Services.AddSingleton<ApplicationService>();
 builder.Services.AddSingleton<ApplicantService>();
 builder.Services.AddSingleton<BusinessService>();
@@ -100,6 +109,7 @@ var app = builder.Build();
 app.MapGet("/v1/health", HealthEndpoint.GetHealthAsync);
 app.MapApplicationEndpoints();
 app.MapDocumentEndpoints();
+app.MapMcEndpoints();
 
 app.Run();
 

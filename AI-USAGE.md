@@ -45,6 +45,7 @@ Be specific per area, not generic.
 | S3 presigned-upload adapter (Phase 4) | Generated `S3DocumentStorage` using presigned **POST** (not PUT) specifically because only POST can enforce a content-length-range condition -- verified against the installed `AWSSDK.S3` package's own XML docs before writing the code, not assumed. Pins Content-Type/size/checksum as S3 policy conditions; `complete()` re-verifies via `ChecksumMode.ENABLED` plus a 16-byte ranged read | *(Osama: fill in)* |
 | `DocumentService` (presign + complete orchestration) | Generated; complete() is idempotent (a repeat call after the document leaves `Uploading` just returns the current record without re-verifying) and treats a checksum/size/signature mismatch as a normal `Rejected` outcome, not an exception | *(Osama: fill in)* |
 | Document endpoints + IAM (Phase 4) | `POST .../documents/presign`, `POST .../documents/{id}/complete`, `GET .../documents/{id}`; `ApiFunction`'s policy extended with `s3:PutObject`/`s3:GetObject`/`s3:GetObjectAttributes` scoped to the one documents bucket ARN -- see §5 for why `PutObject` is required even though the Lambda never uploads a byte itself | *(Osama: fill in)* |
+| MCC catalog (Phase 5) | Compiled a 276-code catalog from the well-established public MCC taxonomy (flagged honestly as a substitute for the brief's named paid source -- see ADR-0004), built a real, runnable import tool (`tools/McCatalogImport`) that validates and regenerates the packaged JSON, `StaticMccCatalog` (in-memory search, no DynamoDB -- justified in ADR-0004), `GET /v1/mcc?query=...` | *(Osama: fill in)* |
 
 *(Osama: the "My involvement" column is intentionally blank — Claude should not write
 this in your voice. Fill it in with what you actually reviewed, questioned, or would
@@ -243,6 +244,21 @@ guessing a second time.
 **Fix:** Object-initializer syntax with the real property names/types; replaced
 `Assert.StartsWith` with `Assert.Equal(expected, actual[..4])` for the byte-array
 comparison.
+
+---
+
+**Issue:** A test for `StaticMccCatalog.Search` asserted that searching `"GAMBLING"`
+would surface MCC 7995. It failed for real: 7995's actual description is "Betting,
+including Lottery Tickets, Casino Gaming, and Wagers" -- it never contains the literal
+word "gambling" (that word only appears in the Category grouping, "High-Risk /
+Gambling", which `Search` deliberately does not match against -- see ADR-0004 on
+keeping taxonomy and risk policy separate).
+**Why it mattered:** The production code was correct; the test's assumed search term
+wasn't backed by the actual data. Exactly the kind of test that would have looked
+reasonable on read-through and only failed by actually running it.
+**What I did:** *(Osama: fill in)*
+**Fix:** Changed the test's query to `"CASINO"`, which the description genuinely
+contains, with a comment explaining why "gambling" doesn't match.
 
 ---
 

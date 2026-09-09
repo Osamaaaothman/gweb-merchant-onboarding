@@ -6,6 +6,7 @@
     <ProjectReference Include="..\Gweb.Services\Gweb.Services.csproj" />
     <ProjectReference Include="..\Gweb.Adapters.Persistence\Gweb.Adapters.Persistence.csproj" />
     <ProjectReference Include="..\Gweb.Adapters.Storage\Gweb.Adapters.Storage.csproj" />
+    <ProjectReference Include="..\Gweb.Adapters.Mcc\Gweb.Adapters.Mcc.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Gweb.Domain\Gweb.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Packaged static data, see docs/adr/0004-mcc-catalog-storage.md. Embedded
+         (not copy-to-output) so the deployed Lambda zip carries it with no separate
+         file-deployment step to get wrong. -->
+    <EmbeddedResource Include="Resources\mcc-codes.json" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+</Project>
