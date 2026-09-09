@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 11 — frontend.** This README grows with
+> **Status: Phase 12 — integration test & end-to-end.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -154,6 +154,12 @@ this project, exercised a genuinely real S3-compatible document upload end-to-en
 [`docs/adr/0010-frontend-architecture.md`](docs/adr/0010-frontend-architecture.md) for
 the full design rationale.
 
+Phase 12 adds the brief's specifically-named mandatory single integration test --
+create → update applicant/business → pre-sign → mock upload completion → classify →
+confirm → evaluate → submit, chained in one continuous run through the real HTTP
+pipeline. See "Running tests" below and
+[`docs/adr/0011-end-to-end-journey-test.md`](docs/adr/0011-end-to-end-journey-test.md).
+
 Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
 [`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md),
@@ -164,7 +170,8 @@ ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runt
 [`docs/adr/0007-rate-evaluation-and-risk-signals.md`](docs/adr/0007-rate-evaluation-and-risk-signals.md),
 [`docs/adr/0008-submission-gate.md`](docs/adr/0008-submission-gate.md),
 [`docs/adr/0009-deadline-hardening-and-retry.md`](docs/adr/0009-deadline-hardening-and-retry.md),
-[`docs/adr/0010-frontend-architecture.md`](docs/adr/0010-frontend-architecture.md).
+[`docs/adr/0010-frontend-architecture.md`](docs/adr/0010-frontend-architecture.md),
+[`docs/adr/0011-end-to-end-journey-test.md`](docs/adr/0011-end-to-end-journey-test.md).
 
 ## Tech stack
 
@@ -364,6 +371,28 @@ dotnet test --collect:"XPlat Code Coverage" --settings coverlet.runsettings \
 `coverlet.runsettings` excludes compiler/source-generator-emitted code (the
 `[GeneratedRegex]` state machines in `Redactor.cs`) from coverage — that code wasn't
 hand-written and shouldn't be judged as if it were.
+
+### The mandatory end-to-end journey test
+
+```bash
+dotnet test --filter FullyQualifiedName~EndToEndJourneyTests
+```
+
+[`tests/Gweb.Tests/EndToEnd/EndToEndJourneyTests.cs`](tests/Gweb.Tests/EndToEnd/EndToEndJourneyTests.cs)
+is the brief's specifically-named integration test: create application → update
+applicant → update business → pre-sign upload → mock upload completion (for all three
+required document types) → classify → confirm → evaluate → submit, in one continuous
+run through the real ASP.NET Core pipeline (`WebApplicationFactory`, never a
+service-layer shortcut). Runs green from a clean checkout with no external
+dependencies — `TestEnvironment.cs` forces `PERSISTENCE_PROVIDER=inmemory` and
+`AI_PROVIDER=mock` for the whole automated suite, so this test needs no Docker, no
+DynamoDB Local, no MinIO, and no network access, unlike the live MinIO/DynamoDB Local
+verification documented above (which is real but manual, not part of this command).
+Also asserts along the way: submission is correctly blocked (`400`, precise missing
+document list) before any documents exist; masked values (government ID, EIN, bank
+account) never appear unmasked anywhere, including in the final submit payload; a
+second submit on an already-submitted application correctly returns `409`, not a
+silent no-op or a second `200`.
 
 ## Deployment instructions **(TBD — Phase 13)**
 
@@ -731,7 +760,7 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 ## Test coverage
 
 Measured by running `dotnet test --collect:"XPlat Code Coverage" --settings
-coverlet.runsettings` (last run: 392 tests, all passing; generated-code excluded per
+coverlet.runsettings` (last run: 399 tests, all passing; generated-code excluded per
 `coverlet.runsettings`):
 
 | Assembly | Line coverage | Branch coverage |
@@ -741,26 +770,22 @@ coverlet.runsettings` (last run: 392 tests, all passing; generated-code excluded
 | `Gweb.Adapters.Mcc` | 100% | 88.9% |
 | `Gweb.Adapters.RiskPolicy` | 100% | 83.3% |
 | `Gweb.Shared` | 98.75% | 93.75% |
-| `Gweb.Services` | 97.22% | 85.71% |
-| `Gweb.Adapters.Persistence` | 98.6% | 80.35% |
+| `Gweb.Adapters.Persistence` | 98.91% | 88.39% |
+| `Gweb.Services` | 96.05% | 92.85% |
+| `Gweb.Api` | 92.93% | 84.28% |
 | `Gweb.Domain` | 91.95% | 88.32% |
-| `Gweb.Api` | 92.79% | 81.42% |
 | `Gweb.Adapters.Evaluation` | 91.21% | 55.76% |
-| **Overall** | **94.49%** | **84.36%** |
+| **Overall** | **94.56%** | **86.13%** |
 
-Roughly flat overall this phase (94.49%/84.36% vs. Phase 9's 94.5%/84.4% — no new
-untested surface, just retry code layered onto already-covered call paths).
-`Gweb.Adapters.Evaluation` ticked up (branch coverage 54.0% → 55.76%) from the new
-retry-demonstration tests (`RetriesATransientHttpFailureAndSucceedsOnALaterAttempt`,
-`GivesUpAfterTheDefaultThreeAttemptsAgainstAPersistentFailure`) exercising branches
-`GeminiEvaluationProvider` didn't have before this phase; it stays the lowest of any
-assembly for the same reason as every prior phase: more independent failure-mode
+Up this phase (94.56%/86.13% vs. Phase 11's 94.49%/84.36%), mainly from two real-bug
+regression tests plus the new end-to-end journey test exercising the full HTTP pipeline
+in sequence. `Gweb.Adapters.Persistence` branch coverage jumped the most (80.35% →
+88.39%) from `SaveRoundTripsCorrectlyWhenEntityTypeHasNeverBeenSet` -- the
+never-set-EntityType branch this test exists for was genuinely untested before the bug
+it caught. `Gweb.Services` branch coverage rose similarly (85.71% → 92.85%) from the
+two classification confidence-cap tests. `Gweb.Adapters.Evaluation` stays the lowest of
+any assembly for the same reason as every prior phase: more independent failure-mode
 branches than the suite exercises every pairwise combination of, each path tested
-individually rather than combinatorially. `Gweb.Shared` dipped slightly (99.35% →
-98.75% line, 95.65% → 93.75% branch) — the new `TaskDelay` (the real, production
-`IDelay`) is deliberately never exercised by any test, since every test that cares about
-retry timing injects `FakeDelay` instead; `TaskDelay` is a one-line pass-through to
-`Task.Delay` with no branching logic to hide a bug in, so this is an accepted, honest
-gap rather than a missing test. Numbers re-measured and reported per-phase; a stale
-percentage from an earlier phase is never left standing in for what a later phase
+individually rather than combinatorially. Numbers re-measured and reported per-phase; a
+stale percentage from an earlier phase is never left standing in for what a later phase
 actually covers.

@@ -866,3 +866,39 @@ list-documents tests; this round added two more for the confidence cap plus one 
 the DynamoDB round-trip fix). `npx tsc -b --noEmit` clean.
 
 Merged to `main` with `--no-ff`, pushed.
+
+---
+
+## 2026-09-09 (same day, continued) — Phase 12 (mandatory end-to-end journey test) built, verified, merged
+
+Continued on "كمل" (continue) after wrapping up Phase 11's live-testing round.
+
+**What got built:** `tests/Gweb.Tests/EndToEnd/EndToEndJourneyTests.cs` -- the brief's
+specifically-named mandatory single integration test, one continuous
+`WebApplicationFactory` run through the real HTTP pipeline: create application →
+update applicant → update business → pre-sign + mock-complete all three required
+document types → classify → confirm → evaluate → submit. Deliberately one test method,
+not several -- the point is proving every stage's state survives into the next one in
+sequence (a document uploaded in step 4 is still there when step 8 submits), which
+splitting into independent tests would stop verifying. Rides along a handful of
+free assertions at points already reached in the sequence: an early `submit` (before
+documents exist) correctly blocked with the precise missing-items list; masked values
+(government ID, EIN, bank account) confirmed absent, unmasked, from the final submit
+payload; a second `submit` after success correctly returns `409`, not a silent no-op.
+`docs/adr/0011-end-to-end-journey-test.md` documents why it's shaped this way, and why
+"mock upload completion" reuses the existing `SimulateUpload` pattern rather than
+re-verifying the real MinIO path Phase 11 already proved live.
+
+**Verified for real:** passed on the first run, no debugging needed -- every stage it
+chains was already individually correct from earlier phases; this is new coverage of
+the *sequence*, not of any single stage's logic. Runs with zero external dependencies
+(`dotnet test --filter FullyQualifiedName~EndToEndJourneyTests`), satisfying the
+brief's "green from a clean checkout" and "runnable with one documented command"
+literally.
+
+**Verified for real, standard checks:** `dotnet build` clean, `dotnet test` --
+399/399 passing (up from 398). Coverage 94.56%/86.13% (up from 94.49%/84.36% --
+`Gweb.Adapters.Persistence` branch coverage jumped most, from the prior round's
+DynamoDB round-trip regression test finally exercising a previously-untested branch).
+
+Merged to `main` with `--no-ff`, pushed.
