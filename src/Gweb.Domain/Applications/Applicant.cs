@@ -48,6 +48,19 @@ public sealed partial class Applicant
     public static Applicant CreateEmpty(Guid applicationId, DateTimeOffset now, string createdBy, string correlationId) =>
         new(applicationId, now, createdBy, correlationId);
 
+    /// <summary>
+    /// An independent copy of the current state. Applicant is a mutable reference
+    /// type; a repository that stores the object itself (rather than a serialized
+    /// copy, e.g. an in-memory test double) must snapshot it here -- otherwise a
+    /// caller mutating its own reference after saving would silently mutate the
+    /// "persisted" copy too. The real DynamoDB repository doesn't need this (it
+    /// serializes to AttributeValues, which is inherently a copy).
+    /// </summary>
+    public Applicant Snapshot() => Rehydrate(
+        ApplicationId, LegalFirstName, LegalMiddleName, LegalLastName, DateOfBirth, ResidentialAddress,
+        Email, Phone, RoleTitle, OwnershipPercentage, GovernmentId, ConsentTimestamp, ConsentVersion,
+        Version, CreatedAt, UpdatedAt, CreatedBy, CorrelationId);
+
     public static Applicant Rehydrate(
         Guid applicationId,
         string? legalFirstName,

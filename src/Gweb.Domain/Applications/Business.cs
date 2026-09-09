@@ -51,6 +51,14 @@ public sealed class Business
     public static Business CreateEmpty(Guid applicationId, DateTimeOffset now, string createdBy, string correlationId) =>
         new(applicationId, now, createdBy, correlationId);
 
+    /// <summary>An independent copy of the current state -- see Applicant.Snapshot()
+    /// for why an in-memory repository needs this.</summary>
+    public Business Snapshot() => Rehydrate(
+        ApplicationId, LegalBusinessName, DbaName, EntityType, FormationCountry, FormationState,
+        RegistrationIdentifier, RegisteredAddress, OperatingAddress, WebsiteUrl, BusinessDescription,
+        BusinessStartDate, VolumeProfile, BeneficialOwners, SettlementBankAccount, ExistingProcessor,
+        Version, CreatedAt, UpdatedAt, CreatedBy, CorrelationId);
+
     public static Business Rehydrate(
         Guid applicationId,
         string? legalBusinessName,

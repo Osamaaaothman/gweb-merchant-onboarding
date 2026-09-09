@@ -16,7 +16,9 @@ public sealed class InMemoryApplicationRepository : IApplicationRepository
 
     public Task CreateAsync(Application application, DeadlineBudget budget, CancellationToken cancellationToken = default)
     {
-        if (!_store.TryAdd(application.Id, application))
+        // Store a snapshot, not the caller's live reference -- see
+        // Application.Snapshot() for why.
+        if (!_store.TryAdd(application.Id, application.Snapshot()))
         {
             throw new ConflictException($"Application {application.Id} already exists.");
         }
