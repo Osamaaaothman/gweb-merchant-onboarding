@@ -36,6 +36,10 @@ Be specific per area, not generic.
 | Unit tests | Generated throughout; Moq introduced for the DynamoDB client boundary specifically (implementing the full `IAmazonDynamoDB` interface by hand was not worth it) | *(Osama: fill in)* |
 | Integration test | `HealthEndpointTests`/`ApplicationEndpointsTests` via `WebApplicationFactory<Program>` -- real HTTP through the real ASP.NET Core pipeline; the applications endpoints were also verified a second way, directly against a real (local) DynamoDB, not just the in-memory adapter | *(Osama: fill in)* |
 | IaC / IAM policies | `ApiFunction`'s `Policies:` block scoped to exactly `dynamodb:PutItem`/`dynamodb:GetItem` on the one table ARN -- extended, not widened, as Phase 3+ needs more actions | *(Osama: fill in)* |
+| Validation logic (Applicant/Business, ~30 fields) | Generated every field's accept/reject rules from the brief §3.1/§3.2, plus the cross-entity ownership-percentage check (`OwnershipValidator`) that neither entity alone could enforce | *(Osama: fill in -- did you spot-check these against the brief field-by-field, or trust the test count?)* |
+| PII masking at capture | `GovernmentIdentification`/`RegistrationIdentifier`/`SettlementBankAccount.FromFull*()` extract only last4 and discard the rest immediately, so the full value never exists in a loggable field | *(Osama: fill in)* |
+| Persistence bugs (in-memory repositories) | Found and fixed two more real bugs this phase by running tests, both variations on "the caller mutated a live reference the repository was also holding" -- full detail in §5 | *(Osama: fill in)* |
+| PATCH endpoints + enum serialization | Found a real bug via HTTP-level tests: `System.Text.Json`'s default enum handling expects numbers, not strings ("Llc"/"Passport"), fixed with `JsonStringEnumConverter` | *(Osama: fill in)* |
 | Documentation (README, ADRs, this file's factual tables) | Generated | *(Osama: fill in)* |
 
 *(Osama: the "My involvement" column is intentionally blank — Claude should not write
@@ -162,6 +166,40 @@ shipped a passing-for-the-wrong-reason test if the assertion had been looser.
 **What I did:** *(Osama: fill in)*
 **Fix:** Changed the test fixtures to `Item = null`, with a comment explaining why,
 so the next person editing this test doesn't reintroduce the same wrong assumption.
+
+---
+
+**Issue:** `InMemoryApplicantRepository`/`InMemoryBusinessRepository`'s `SaveAsync`
+stored the caller's live object reference instead of a copy. `Applicant`/`Business`
+are mutable classes, so a second `ApplyUpdate` call on the same in-memory object after
+saving silently mutated the "persisted" copy too, breaking the optimistic-concurrency
+version check. Caught by `SecondUpdateMergesOntoTheFirst` failing for real with a
+`ConflictException` that made no logical sense given the test's own sequence of calls.
+**Why it mattered:** *(Osama: fill in — this bug wouldn't affect the real DynamoDB
+repository at all, since serializing to AttributeValues is inherently a copy. Does
+that change how seriously you'd weigh a test-double-only bug versus a bug in the real
+adapter?)*
+**What I did:** *(Osama: fill in)*
+**Fix:** Added `Snapshot()` to `Applicant`/`Business`/`Application`, called it in both
+`SaveAsync` (store a copy) and `GetByApplicationIdAsync`/`GetByIdAsync` (return a
+copy) in all three in-memory repositories. Two regression tests added, one per side of
+the bug (mutate-after-save, mutate-after-get).
+
+---
+
+**Issue:** PATCH requests carrying enum fields as strings (`"entityType": "Llc"`,
+`"governmentId": {"type": "Passport", ...}`) failed to deserialize --
+`System.Text.Json`'s default enum handling expects the numeric underlying value, not
+the name, unless a `JsonStringEnumConverter` is registered. Two endpoint tests failed
+for real with unexpected status codes/unparseable response bodies before this was
+diagnosed.
+**Why it mattered:** *(Osama: fill in — every curl example in the README sends enums
+as strings; without this fix, the documented API examples would not have worked as
+written, which is exactly the kind of gap that erodes trust in documentation.)*
+**What I did:** *(Osama: fill in)*
+**Fix:** `builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()))`
+in `Program.cs`, applied globally so it covers both request deserialization and
+response serialization consistently.
 
 ---
 

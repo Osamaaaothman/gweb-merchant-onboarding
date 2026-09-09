@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 2 — application lifecycle & persistence.** This README grows with
+> **Status: Phase 3 — applicant & business intake.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -36,9 +36,18 @@ deviation from the architecture rules' one-Lambda-per-route preference, justifie
 Application state lives in a **single DynamoDB table** (`gweb-applications-{stage}`),
 one item type per aggregate member under a shared `APP#{id}` partition key — see
 [`docs/adr/0003-dynamodb-table-strategy.md`](docs/adr/0003-dynamodb-table-strategy.md)
-for the full access-pattern table. Phase 2 implements the `Application` aggregate
-(create + resume) against it; Person/Document/Evaluation items land in later phases
-using the same table, no new IaC resource per entity.
+for the full access-pattern table. So far: `Application` (create + resume, Phase 2),
+`Applicant` and `Business` (full field set from the brief §3.1/§3.2, PATCH semantics,
+Phase 3). Document/Evaluation items land in later phases using the same table, no new
+IaC resource per entity.
+
+Government ID numbers, EIN/UBI, and bank account numbers are **masked at capture**:
+the domain layer extracts only the last 4 characters the moment a PATCH request
+arrives and discards the rest immediately (`GovernmentIdentification.FromFullNumber`,
+`RegistrationIdentifier.FromFullValue`, `SettlementBankAccount.FromFullAccountNumber`
+in `src/Gweb.Domain/Applications/`) — the full value is never stored, never logged,
+and never returned in a response, because it never exists anywhere past that one
+conversion call.
 
 Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
@@ -145,11 +154,21 @@ curl -i http://localhost:5280/v1/applications/<id-from-the-response-above>
 every deployed environment — it exists purely so the real repository code can be
 pointed at DynamoDB Local instead of AWS, with no code change.
 
-**Actually run, this session, against a real (local) DynamoDB** — not asserted:
-`POST /v1/applications` → `201` with `Location: /v1/applications/<id>`; `GET` on that
-ID → `200` with the same application; a second `POST` → a different ID; `GET` on a
-random well-formed UUID → `404 NOT_FOUND`; `GET /v1/applications/not-a-guid` → `400
-VALIDATION_FAILED`. Full request/response pairs are in this session's transcript.
+**Actually run against a real (local) DynamoDB** (Phase 2, `Application` only): `POST
+/v1/applications` → `201` with `Location: /v1/applications/<id>`; `GET` on that ID →
+`200` with the same application; a second `POST` → a different ID; `GET` on a random
+well-formed UUID → `404 NOT_FOUND`; `GET /v1/applications/not-a-guid` → `400
+VALIDATION_FAILED`.
+
+**Phase 3's `Applicant`/`Business` DynamoDB repositories were not re-verified against
+a live DynamoDB Local** — Docker's Windows service needed re-approval mid-session and
+that wasn't blocked on further. What *is* verified for real: `sam build` (a real
+`dotnet publish` including the new repositories), and every `DynamoDbApplicantRepositoryTests`
+/ `DynamoDbBusinessRepositoryTests` round-trips through a fake in-memory
+`IAmazonDynamoDB` built from the exact same AWS SDK request/response types the real
+client uses — proving `ToItem`/`FromItem` are inverses for every field, including the
+nested address/volume-profile/beneficial-owner maps and lists. That is real evidence,
+just not the same as a live call. Worth actually running once Docker is available.
 
 **B) `sam local start-api` with in-memory persistence**, no DynamoDB at all: pass
 `--env-vars` pointing at a JSON file setting `PERSISTENCE_PROVIDER=inmemory` for
@@ -206,6 +225,24 @@ curl -i http://localhost:5280/v1/applications/00000000-0000-0000-0000-0000000000
 # Malformed id -- rejected at the boundary, never reaches DynamoDB
 curl -i http://localhost:5280/v1/applications/not-a-guid
 # -> 400, {"error":{"code":"VALIDATION_FAILED",...}}
+
+# Fill in applicant fields -- partial, PATCH semantics, call as many times as needed
+curl -i -X PATCH http://localhost:5280/v1/applications/<id>/applicant \
+  -H "Content-Type: application/json" \
+  -d '{"legalFirstName":"Jane","legalLastName":"Testerson","email":"jane@example.invalid","governmentId":{"type":"Passport","number":"X1234567"}}'
+# -> 200, body has governmentId.last4 = "4567" -- the full number never appears anywhere
+
+# Fill in business fields, including beneficial owners
+curl -i -X PATCH http://localhost:5280/v1/applications/<id>/business \
+  -H "Content-Type: application/json" \
+  -d '{"legalBusinessName":"Testerson Trading LLC","entityType":"Llc","beneficialOwners":[{"name":"John Doe","roleTitle":"Co-owner","ownershipPercentage":40}]}'
+# -> 200; combined ownership (this + the applicant's own OwnershipPercentage, if set)
+#    over 100% -> 400 VALIDATION_FAILED instead
+
+# Full aggregate view, including completeness -- what's still missing to submit
+curl http://localhost:5280/v1/applications/<id>
+# -> 200, { id, status, ..., applicant: {...}, business: {...},
+#           completeness: { isComplete, missingApplicantFields: [...], missingBusinessFields: [...] } }
 ```
 
 ## Assumptions
@@ -250,12 +287,26 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   workaround (`dotnet run` directly against DynamoDB Local). Root cause not
   determined; a minor SAM CLI/managed-runtime interaction, not a bug in this repo's
   code, but worth understanding before relying on that flag for anything else.
-- **Only the `Application` aggregate's envelope exists** (id, status, version, audit
-  fields) — no applicant/business/ownership fields yet. Those, and the
-  `Person`/`Business` PATCH endpoints, are Phase 3.
 - **`Application.Submit()` exists but is unreachable from the API** — no `POST
   /v1/applications/{id}/submit` endpoint yet (Phase 9). The state-machine guard is
   unit-tested directly against the domain type in the meantime.
+- **Beneficial owners beyond the primary applicant are lightweight records** (name,
+  role, ownership percentage only) embedded in the `Business` payload, not full
+  Applicant-grade KYC profiles with their own DOB/address/government ID. The brief
+  places "ownership / beneficial-owner structure" as a `Business` field, and the API
+  surface names only one PATCH route for individual/control-person data — see
+  `src/Gweb.Domain/Applications/BeneficialOwner.cs`'s doc comment for the full
+  reasoning. A production system would likely give each beneficial owner their own
+  full KYC record and document (this matters for real KYB compliance); documented
+  here as a deliberate scope cut given the assessment's literal API surface, not an
+  oversight.
+- **No consent/attestation *enforcement* yet** — `ConsentVersion`/`ConsentTimestamp`
+  are captured and required for `CompletenessChecker` to report the applicant
+  complete, but nothing currently blocks any other action on their absence (that
+  blocking is Phase 9's submission gate).
+- **Phase 3's DynamoDB-backed repositories were not verified against a live DynamoDB
+  Local** in this session (Docker needed re-approval) — see "Testing the
+  `/v1/applications` endpoints" above for exactly what was and wasn't verified.
 
 ## What is real vs. mocked
 
@@ -267,25 +318,24 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 ## Test coverage
 
 Measured by running `dotnet test --collect:"XPlat Code Coverage" --settings
-coverlet.runsettings` (last run: 78 tests, all passing; generated-code excluded per
+coverlet.runsettings` (last run: 152 tests, all passing; generated-code excluded per
 `coverlet.runsettings`):
 
 | Assembly | Line coverage | Branch coverage |
 |---|---|---|
-| `Gweb.Domain` | 100% | 100% |
 | `Gweb.Services` | 100% | 100% |
-| `Gweb.Adapters.Persistence` | 100% | 100% |
 | `Gweb.Config` | 100% | 100% |
+| `Gweb.Adapters.Persistence` | 97.4% | 76.4% |
 | `Gweb.Shared` | 99.3% | 95.7% |
-| `Gweb.Api` | 88.2% | 50% |
-| **Overall** | **96.4%** | **90.5%** |
+| `Gweb.Domain` | 88.9% | 87.1% |
+| `Gweb.Api` | 88.7% | 70.8% |
+| **Overall** | **92.2%** | **84.8%** |
 
-`Gweb.Api`'s lower number is mostly `Program.cs`'s startup branching (choosing
-DynamoDB vs. in-memory, setting `DynamoDbConfig.ServiceURL`) — code that runs once at
-process start, before DI exists to inject a test double into, and is instead verified
-by actually running it (see "Prerequisites and local setup" above) rather than chased
-for coverage percentage. Not claiming that split is ideal, just accurate.
-
-This will keep being re-measured and reported per-phase as `policy/` and the rest of
-`adapters/` are added; a stale global percentage from an earlier phase is never left
-standing in for what a later phase actually covers.
+Both dropped from Phase 2's numbers with real, explainable causes, not a quality
+regression: `Gweb.Domain` grew by ~15 validation methods across `Applicant`/`Business`
+(each with several branches: null-skip, empty-reject, over-length-reject, valid-accept
+— not every permutation of ~30 fields has its own test, only the ones that exercise a
+genuinely distinct rule). `Gweb.Api`'s DTO `ToDomain()` mapping methods are thin
+pass-through code exercised indirectly by the endpoint tests rather than unit-tested
+in isolation. Numbers re-measured and reported per-phase; a stale percentage from an
+earlier phase is never left standing in for what a later phase actually covers.

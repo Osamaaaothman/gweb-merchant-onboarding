@@ -58,6 +58,15 @@ public sealed class Application
         new(id, status, version, createdAt, updatedAt, createdBy, correlationId);
 
     /// <summary>
+    /// An independent copy of the current state. Application is a mutable reference
+    /// type; a repository that stores the object itself (an in-memory test double,
+    /// rather than serializing it) must snapshot it here -- otherwise a caller
+    /// mutating its own reference (e.g. calling Submit()) after saving would silently
+    /// mutate the "persisted" copy too.
+    /// </summary>
+    public Application Snapshot() => Rehydrate(Id, Status, Version, CreatedAt, UpdatedAt, CreatedBy, CorrelationId);
+
+    /// <summary>
     /// Locks the application for review. Explicit state-machine guard — illegal
     /// transitions (e.g. submitting an already-submitted application) are rejected,
     /// never silently allowed through blind field assignment.

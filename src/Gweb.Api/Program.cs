@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Amazon.DynamoDBv2;
 using Gweb.Adapters.Persistence;
 using Gweb.Api;
@@ -17,6 +18,11 @@ var builder = WebApplication.CreateBuilder(args);
 // there, not silently accepted.
 builder.Services.AddAWSLambdaHosting(LambdaEventSource.HttpApi);
 
+// Enums (EntityType, GovernmentIdentificationType, ...) serialize/deserialize as
+// their string names ("Llc", "Passport") both directions -- friendlier for API
+// consumers than the numeric default, and matches every example in the README.
+builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+
 // Loaded and validated once at process start (= Lambda cold start on a fresh
 // execution environment), not per request.
 var config = AppConfigLoader.LoadBaseConfig(Environment.GetEnvironmentVariable);
@@ -32,6 +38,8 @@ var persistenceProvider = Environment.GetEnvironmentVariable("PERSISTENCE_PROVID
 if (string.Equals(persistenceProvider, "inmemory", StringComparison.OrdinalIgnoreCase))
 {
     builder.Services.AddSingleton<IApplicationRepository, InMemoryApplicationRepository>();
+    builder.Services.AddSingleton<IApplicantRepository, InMemoryApplicantRepository>();
+    builder.Services.AddSingleton<IBusinessRepository, InMemoryBusinessRepository>();
 }
 else
 {
@@ -48,9 +56,15 @@ else
     builder.Services.AddSingleton<IAmazonDynamoDB>(new AmazonDynamoDBClient(dynamoDbConfig));
     builder.Services.AddSingleton<IApplicationRepository>(
         sp => new DynamoDbApplicationRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
+    builder.Services.AddSingleton<IApplicantRepository>(
+        sp => new DynamoDbApplicantRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
+    builder.Services.AddSingleton<IBusinessRepository>(
+        sp => new DynamoDbBusinessRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
 }
 
 builder.Services.AddSingleton<ApplicationService>();
+builder.Services.AddSingleton<ApplicantService>();
+builder.Services.AddSingleton<BusinessService>();
 
 var app = builder.Build();
 

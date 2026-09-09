@@ -16,7 +16,6 @@ namespace Gweb.Adapters.Persistence;
 /// </summary>
 public sealed class DynamoDbApplicationRepository(IAmazonDynamoDB client, string tableName) : IApplicationRepository
 {
-    private const long DefaultReserveMs = 500;
     private const string EntityType = "APPLICATION";
     private const string MetaSortKey = "META";
 
@@ -31,7 +30,7 @@ public sealed class DynamoDbApplicationRepository(IAmazonDynamoDB client, string
 
         try
         {
-            await ExecuteAsync(ct => client.PutItemAsync(request, ct), budget, cancellationToken).ConfigureAwait(false);
+            await DynamoDbCallExecutor.ExecuteAsync(ct => client.PutItemAsync(request, ct), budget, cancellationToken).ConfigureAwait(false);
         }
         catch (ConditionalCheckFailedException)
         {
@@ -52,55 +51,12 @@ public sealed class DynamoDbApplicationRepository(IAmazonDynamoDB client, string
             ConsistentRead = true,
         };
 
-        var response = await ExecuteAsync(ct => client.GetItemAsync(request, ct), budget, cancellationToken).ConfigureAwait(false);
+        var response = await DynamoDbCallExecutor.ExecuteAsync(ct => client.GetItemAsync(request, ct), budget, cancellationToken).ConfigureAwait(false);
 
         return response.IsItemSet ? FromItem(response.Item) : null;
     }
 
-    /// <summary>
-    /// Wraps a single outbound DynamoDB call: derives its timeout from the remaining
-    /// deadline budget, and translates SDK-level failures into the domain taxonomy.
-    /// Never lets a raw AmazonDynamoDBException (which can carry table/ARN details in
-    /// its message) reach the HTTP boundary.
-    /// </summary>
-    private static async Task<T> ExecuteAsync<T>(
-        Func<CancellationToken, Task<T>> action,
-        DeadlineBudget budget,
-        CancellationToken cancellationToken)
-    {
-        var timeoutMs = budget.ForCall(DefaultReserveMs);
-        if (timeoutMs <= 0)
-        {
-            throw new DependencyTimeoutException("Deadline budget exhausted before the DynamoDB call could be attempted.");
-        }
-
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(timeoutMs));
-
-        try
-        {
-            return await action(timeoutCts.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            // Our own timeout fired, not the caller's cancellation -- report as a
-            // structured, retryable dependency timeout, never a raw crash.
-            throw new DependencyTimeoutException("DynamoDB call exceeded its allotted timeout budget.");
-        }
-        catch (AmazonDynamoDBException ex) when (ex is not ConditionalCheckFailedException)
-        {
-            // ConditionalCheckFailedException is deliberately NOT caught here -- it
-            // is a subtype of AmazonDynamoDBException, but callers (e.g. CreateAsync)
-            // need to translate it into a ConflictException, not a generic
-            // "unavailable" one. Everything else (throttling, internal errors, ...)
-            // becomes a retryable DependencyUnavailableException. No exception
-            // message/details forwarded to the client either way -- AWS SDK exception
-            // text can contain table names or ARNs.
-            throw new DependencyUnavailableException("DynamoDB is temporarily unavailable.");
-        }
-    }
-
-    private static string PartitionKey(Guid id) => $"APP#{id}";
+    internal static string PartitionKey(Guid id) => $"APP#{id}";
 
     private static Dictionary<string, AttributeValue> ToItem(Application application) => new()
     {
