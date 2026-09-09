@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Gweb.Domain\Gweb.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Hand-authored configuration data, not synced from an external published
+         dataset (unlike src/Gweb.Adapters.Mcc's mcc-codes.json). Risk appetite is
+         this org's own business policy, reviewed like any other PR change, not
+         imported from a third party. See docs/adr/0005-risk-policy-representation.md. -->
+    <EmbeddedResource Include="Resources\risk-policy.json" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+</Project>
