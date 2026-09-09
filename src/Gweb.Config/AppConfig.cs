@@ -7,7 +7,7 @@ namespace Gweb.Config;
 public enum AiProvider
 {
     Mock,
-    Anthropic,
+    Gemini,
 }
 
 /// <summary>
@@ -21,6 +21,7 @@ public sealed record BaseConfig(
     int PresignTtlSeconds,
     AiProvider AiProvider,
     string? AiApiKey,
+    string GeminiModel,
     LogLevel LogLevel);
 
 public static class AppConfigLoader
@@ -33,6 +34,11 @@ public static class AppConfigLoader
             PresignTtlSeconds: (int)ParsePositiveLong(getEnv("PRESIGN_TTL_SECONDS"), 300, "PRESIGN_TTL_SECONDS"),
             AiProvider: ParseEnum(getEnv("AI_PROVIDER"), AiProvider.Mock, "AI_PROVIDER"),
             AiApiKey: getEnv("AI_API_KEY"),
+            // gemini-3.6-flash confirmed working against the real API during this
+            // phase's build (see docs/adr/0006-ai-evaluation-provider.md) -- an env
+            // var, not a hardcoded model string, because Google's free-tier model
+            // lineup has already moved once during this session and will again.
+            GeminiModel: getEnv("GEMINI_MODEL") is { Length: > 0 } model ? model : "gemini-3.6-flash",
             LogLevel: ParseEnum(getEnv("LOG_LEVEL"), LogLevel.Info, "LOG_LEVEL"));
     }
 
