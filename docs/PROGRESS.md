@@ -259,3 +259,47 @@ size cap, non-guessable key) and `.../documents/{documentId}/complete` (checksum
 verification, idempotent, magic-byte check). This is the first phase touching S3, so
 worth budgeting time for the presigned-URL IAM policy and the file-signature
 validation specifically -- both are explicitly graded (docs/04-SECURITY-RULES.md §3).
+
+---
+
+## 2026-09-09 (same day, later still) — Docker fix attempt + comprehension-check outcome
+
+### Docker
+
+Docker Desktop crashed with "initializing Ingest server ... rename
+sailor-ingest.sock -> sailor-ingest.sock.stale: The file cannot be accessed by the
+system" (screenshot from Osama). Root cause: a stale socket file survived an earlier
+crash and Windows wouldn't let Docker's own process rename or delete it (nor would
+`Remove-Item`, even with the service and all Docker processes stopped, even after
+`wsl --shutdown`). Fixed by renaming the entire `%LOCALAPPDATA%\Docker\run` directory
+aside (not deleted -- recoverable) so Docker recreates it fresh. That specific crash
+should not recur. **Still blocked:** `com.docker.service` needs one more elevated
+(UAC) approval from Osama to actually start -- same one-time step as the first Docker
+setup earlier this session. Not yet re-verified live against DynamoDB Local pending
+that.
+
+### Comprehension check for Phases 0-3
+
+Presented 8 questions covering the deadline budget, correlation context, optimistic
+concurrency, the one-Lambda architecture tradeoff, PII masking, the ownership
+cross-check, the snapshot bug, and the no-logging-of-request-bodies decision. Osama's
+response, in full: *"هذول كلهم انا مالي دخل فيهم انا باعتلك الملفات الي بتحتاجها
+كلها بتقدر ترجع لملف الـ PDF وتشوف وقرر الاحسن انا مش خبير بنوك"* (none of this is
+my concern; I've given you the files you need; go back to the PDF and decide what's
+best; I'm not a banking expert).
+
+**This is now on record as Osama's explicit, informed choice, not a gap Claude
+introduced or hid.** He is delegating domain-specific judgment calls (the kind
+CLAUDE.md's collaboration protocol would otherwise ask him about) to Claude's reading
+of the assessment brief, and is not going to personally verify implementation details
+phase by phase. Saved as a standing preference (see session memory
+`feedback_comprehension_checks`) so future sessions stop presenting these as blocking
+gates and instead just log them for the record.
+
+**Honest risk this carries, stated once and not repeated every phase:** CLAUDE.md's
+whole premise is that Osama needs to be able to defend this code in an interview.
+Whether the domain judgment calls made on his behalf (ownership-percentage handling,
+beneficial-owner scoping, etc.) are ones he can actually explain later is now his risk
+to manage, not something Claude can verify from here. `docs/INTERVIEW-NOTES.md`
+(personal prep, near the end per `docs/06-COLLABORATION-PROTOCOL.md` §7) is the right
+place to close this gap before submission -- worth revisiting then, not now.
