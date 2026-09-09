@@ -75,10 +75,10 @@ Resources:
         PointInTimeRecoveryEnabled: true
 
   # --- Documents: S3 -----------------------------------------------------------------
-  # Private, block-public-access, encrypted, versioned. Pre-signed PUT is the only
-  # upload path — no Lambda ever receives a document body. Lifecycle policy for
-  # abandoned applications lands in Phase 4 alongside the document lifecycle state
-  # machine (docs/04-SECURITY-RULES.md §6).
+  # Private, block-public-access, encrypted, versioned. Pre-signed POST (not PUT --
+  # see S3DocumentStorage.cs for why: only a presigned POST can enforce a
+  # content-length-range condition) is the only upload path — no Lambda ever
+  # receives a document body.
   DocumentsBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -96,7 +96,7 @@ Resources:
         Status: Enabled
       CorsConfiguration:
         CorsRules:
-          - AllowedMethods: [PUT]
+          - AllowedMethods: [POST]
             # Tightened to the deployed web app's real origin once one exists
             # (Phase 11) — wildcard is a known, documented Phase-1 gap, not an
             # oversight. See README "Known gaps".
@@ -129,11 +129,20 @@ Resources:
       Environment:
         Variables:
           APPLICATIONS_TABLE_NAME: !Ref ApplicationsTable
+          DOCUMENTS_BUCKET_NAME: !Ref DocumentsBucket
       # Scoped to exactly PutItem/GetItem on this one table -- never dynamodb:*, never
-      # Resource: "*". Covers Application, Applicant, and Business items alike (all
-      # three repositories use only these two operations); extend this list (never
-      # widen it to a wildcard) when a later phase adds Query (e.g. listing documents)
-      # or UpdateItem.
+      # Resource: "*". Covers Application, Applicant, Business, and Document items
+      # alike (all four repositories use only these two operations); extend this list
+      # (never widen it to a wildcard) when a later phase adds Query (e.g. listing
+      # documents) or UpdateItem.
+      #
+      # S3 is scoped the same way, to object actions under this one bucket only.
+      # s3:PutObject is granted even though the Lambda itself never uploads a byte --
+      # a pre-signed POST is signed with this role's own credentials, so S3 authorizes
+      # the *client's* eventual upload against this role's permissions, not against an
+      # unauthenticated allowance. Without PutObject here, every presigned upload would
+      # 403 at S3 despite a validly-signed request. s3:GetObject/GetObjectAttributes are
+      # for complete()'s verification read.
       Policies:
         - Statement:
             - Effect: Allow
@@ -141,6 +150,12 @@ Resources:
                 - dynamodb:PutItem
                 - dynamodb:GetItem
               Resource: !GetAtt ApplicationsTable.Arn
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:GetObjectAttributes
+              Resource: !Sub ${DocumentsBucket.Arn}/*
       Events:
         Proxy:
           Type: HttpApi

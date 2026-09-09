@@ -1,11 +1,16 @@
 using System.Text.Json.Serialization;
 using Amazon.DynamoDBv2;
+using Amazon.S3;
 using Gweb.Adapters.Persistence;
+using Gweb.Adapters.Storage;
 using Gweb.Api;
 using Gweb.Api.Applications;
+using Gweb.Api.Documents;
 using Gweb.Config;
 using Gweb.Domain.Applications;
+using Gweb.Domain.Documents;
 using Gweb.Services.Applications;
+using Gweb.Services.Documents;
 using Gweb.Shared.Clock;
 using Gweb.Shared.Logging;
 
@@ -40,6 +45,8 @@ if (string.Equals(persistenceProvider, "inmemory", StringComparison.OrdinalIgnor
     builder.Services.AddSingleton<IApplicationRepository, InMemoryApplicationRepository>();
     builder.Services.AddSingleton<IApplicantRepository, InMemoryApplicantRepository>();
     builder.Services.AddSingleton<IBusinessRepository, InMemoryBusinessRepository>();
+    builder.Services.AddSingleton<IDocumentRepository, InMemoryDocumentRepository>();
+    builder.Services.AddSingleton<IDocumentStorage, InMemoryDocumentStorage>();
 }
 else
 {
@@ -60,16 +67,39 @@ else
         sp => new DynamoDbApplicantRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
     builder.Services.AddSingleton<IBusinessRepository>(
         sp => new DynamoDbBusinessRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
+    builder.Services.AddSingleton<IDocumentRepository>(
+        sp => new DynamoDbDocumentRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
+
+    var documentsBucketName = AppConfigLoader.RequireEnv("DOCUMENTS_BUCKET_NAME", Environment.GetEnvironmentVariable);
+    // S3_SERVICE_URL mirrors DYNAMODB_SERVICE_URL -- unset in every deployed
+    // environment, only used to point at a local S3-compatible endpoint if one is
+    // ever wired up for local testing.
+    var s3ServiceUrl = Environment.GetEnvironmentVariable("S3_SERVICE_URL");
+    var s3Config = new AmazonS3Config();
+    if (!string.IsNullOrWhiteSpace(s3ServiceUrl))
+    {
+        s3Config.ServiceURL = s3ServiceUrl;
+        s3Config.ForcePathStyle = true;
+    }
+    builder.Services.AddSingleton<IAmazonS3>(new AmazonS3Client(s3Config));
+    builder.Services.AddSingleton<IDocumentStorage>(
+        sp => new S3DocumentStorage(sp.GetRequiredService<IAmazonS3>(), documentsBucketName));
 }
 
 builder.Services.AddSingleton<ApplicationService>();
 builder.Services.AddSingleton<ApplicantService>();
 builder.Services.AddSingleton<BusinessService>();
+builder.Services.AddSingleton(sp => new DocumentService(
+    sp.GetRequiredService<IDocumentRepository>(),
+    sp.GetRequiredService<IDocumentStorage>(),
+    sp.GetRequiredService<IClock>(),
+    TimeSpan.FromSeconds(config.PresignTtlSeconds)));
 
 var app = builder.Build();
 
 app.MapGet("/v1/health", HealthEndpoint.GetHealthAsync);
 app.MapApplicationEndpoints();
+app.MapDocumentEndpoints();
 
 app.Run();
 
