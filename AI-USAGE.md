@@ -47,6 +47,7 @@ Be specific per area, not generic.
 | Document endpoints + IAM (Phase 4) | `POST .../documents/presign`, `POST .../documents/{id}/complete`, `GET .../documents/{id}`; `ApiFunction`'s policy extended with `s3:PutObject`/`s3:GetObject`/`s3:GetObjectAttributes` scoped to the one documents bucket ARN -- see §5 for why `PutObject` is required even though the Lambda never uploads a byte itself | *(Osama: fill in)* |
 | MCC catalog (Phase 5) | Compiled a 276-code catalog from the well-established public MCC taxonomy (flagged honestly as a substitute for the brief's named paid source -- see ADR-0004), built a real, runnable import tool (`tools/McCatalogImport`) that validates and regenerates the packaged JSON, `StaticMccCatalog` (in-memory search, no DynamoDB -- justified in ADR-0004), `GET /v1/mcc?query=...` | *(Osama: fill in)* |
 | Risk policy engine (Phase 6) | `IRiskPolicy` structurally decoupled from `IMccCatalog` (no shared type between them), `StaticRiskPolicy` with a resolution order (provider override -> base rule -> document default) that has no hardcoded fallback anywhere outside the one config value; hand-authored (not imported) risk-policy.json with real provider overrides proving 6012 evaluates to three different levels under three configs; `NoAutoApprovalPathTests` enforces "never auto-approve" structurally against the domain's own enum vocabulary, not just as a promise in prose | *(Osama: fill in)* |
+| AI evaluation adapter + MCC classify (Phase 7) | Osama supplied a real Gemini API key mid-session (not Anthropic/OpenAI/Bedrock, the brief's named examples -- no vendor is mandated) with the instruction to use only free-tier models and build so the system works with or without a real key at grading time. Built `IEvaluationProvider` + `MockEvaluationProvider` (deterministic, reuses real catalog hints) + `GeminiEvaluationProvider` (real HTTP calls, schema validation, one bounded repair retry, budget-derived timeout capped at 20s -- see §5 for the empirical latency finding behind that cap). `ClassificationService` grounds every request against the real MCC catalog, drops hallucinated codes, and falls back to the mock provider (clearly labelled) if the real one fails. `POST/GET .../classify`, `POST .../classify/confirm`. Verified against the live Gemini API multiple times, including one full real request through the entire stack that correctly classified a grocery description as MCC 5411 -- see ADR-0006 | *(Osama: fill in)* |
 
 *(Osama: the "My involvement" column is intentionally blank — Claude should not write
 this in your voice. Fill it in with what you actually reviewed, questioned, or would
@@ -260,6 +261,68 @@ reasonable on read-through and only failed by actually running it.
 **What I did:** *(Osama: fill in)*
 **Fix:** Changed the test's query to `"CASINO"`, which the description genuinely
 contains, with a comment explaining why "gambling" doesn't match.
+
+---
+
+**Issue:** `ClassificationService`'s first version passed the whole free-text
+`business.BusinessDescription` sentence straight into `IMccCatalog.Search` as one query
+string. `StaticMccCatalog.Search` does substring/prefix matching (built for a short
+typed query like "grocery", not a paragraph) -- found manually verifying the real
+Gemini integration end-to-end: a legitimate grocery-store description produced **zero**
+catalog hints, meaning neither Gemini nor the mock fallback had anything real to work
+with. No unit test caught this because every test up to that point handed
+`IEvaluationProvider` a hand-picked hint list directly, never exercising the real
+catalog's actual matching behavior against realistic free text.
+**Why it mattered:** This is exactly the kind of bug a fully-mocked test suite cannot
+catch on its own -- it only surfaced by actually calling the real API end-to-end and
+looking at what came back, not by reading the code or trusting the (passing) test
+suite.
+**What I did:** *(Osama: fill in)*
+**Fix:** `ClassificationService` now splits the description into significant words and
+searches per keyword, unioning the results, falling back to the catalog's browsing
+default only if every keyword search comes up empty. Added
+`ClassifyBuildsCatalogHintsFromDescriptionKeywordsNotAsOneLiteralSubstring` as a
+regression test, then re-verified against the live API to confirm the fix (correctly
+classified as MCC 5411, confidence 0.98).
+
+---
+
+**Issue:** `GeminiEvaluationProvider`'s first version threw a
+`DependencyUnavailableException` directly when Gemini's response had
+`finishReason: "MAX_TOKENS"` (output cut off before finishing the JSON). That throw
+happened inside the single HTTP-call helper, which meant it propagated straight past
+`CallWithRepairRetryAsync`'s retry logic entirely -- an exception skips the
+`TryParseCandidates`-based check the retry path is built around, so "MAX_TOKENS
+triggers a repair retry" was true in a code comment and false in the actual control
+flow.
+**Why it mattered:** Caught by this phase's own test suite, not by inspection --
+`TreatsAMaxTokensFinishReasonAsATruncatedResponseAndRetries` failed with the exception
+propagating on the first call instead of the expected second-call success, exactly the
+kind of "the comment says one thing, the code does another" bug a test catches and a
+read-through does not.
+**What I did:** *(Osama: fill in)*
+**Fix:** Removed the throw; a truncated response is syntactically invalid JSON on its
+own, so letting it flow into the same `JsonException`-driven failure path a garbled
+response already uses achieves "triggers retry" through the one retry mechanism that
+actually exists.
+
+---
+
+**Issue:** `GeminiCallExecutor`'s `HttpRequestException` handler passed
+`ex.Message` as the `details` argument to `DependencyUnavailableException` --
+mirroring `S3CallExecutor`'s doc comment ("no exception message/details forwarded to
+the client") in prose while doing the opposite in code. `HttpErrorMapper` serializes
+`DomainException.Details` straight into the client-facing HTTP response body, so this
+would have leaked whatever an `HttpRequestException.Message` contains (can include
+hostnames/connection details) to any caller.
+**Why it mattered:** A one-line security-relevant regression that copy-pasting a
+comment without copy-pasting the behavior it describes would have shipped silently --
+nothing would have failed a test for it, since no test asserted on the *absence* of
+detail in that specific exception.
+**What I did:** *(Osama: fill in -- does this change how much you trust a comment that
+asserts a security property, versus one that's just documentation?)*
+**Fix:** Caught during this phase's own build, before ever running -- removed the
+`ex.Message` argument, matching the actual established convention.
 
 ---
 

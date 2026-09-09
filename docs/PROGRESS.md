@@ -485,3 +485,68 @@ Then: *"طيب يلا نكمل روح ع الي بعده وكمل"* -- proceeded
 passing (up from 238). Coverage 92.8%/84.7% (flat vs. Phase 5's 92.6%/84.7%).
 
 Merged to `main` with `--no-ff`, pushed.
+
+---
+
+## 2026-09-09 (same day, continued) — Phase 7 (AI adapter & MCC classification) built, verified live against real Gemini, merged
+
+Osama asked "بزبط معك gemenai ai؟" (does Gemini work with you?) and, after confirming
+the brief mandates no specific vendor (just "an adapter with a mock implementation"),
+supplied a real Gemini API key -- explicitly: use only free-tier models, and build so
+the system works whether or not a real key is available at grading time. Key stored
+only in a local, git-ignored `.env` (confirmed git-ignored before writing anything to
+it), never in source or a commit.
+
+**Before writing any adapter code, verified the real API directly with curl** (per
+this session's standing practice of checking real behavior over memory):
+`gemini-2.5-flash` (the model assumed from general knowledge) turned out to already be
+retired for new users -- the API's own 404 named the replacement, `gemini-3.6-flash`,
+which is what got built against. Also discovered empirically: this model spends a
+large share of its output-token budget on hidden "thinking" tokens before visible text
+(`thoughtsTokenCount` in the raw response), meaning a naive `maxOutputTokens` budget
+silently truncates the JSON answer, and a single call can take 15-30+ seconds --
+uncomfortably close to the system's 35s internal deadline target.
+
+**What got built:** `IEvaluationProvider`/`McClassification` (own aggregate, not
+bolted onto `Business`, to avoid touching already-shipped, fully-tested code) in
+`Gweb.Domain.Evaluation`; `MockEvaluationProvider` + `GeminiEvaluationProvider` in a
+new `Gweb.Adapters.Evaluation` project (schema validation, one bounded repair retry,
+hallucination guard via real catalog re-validation, a hardcoded 20s cap on the Gemini
+call specifically because of the latency finding above); `ClassificationService`
+(fallback-to-mock policy, keyword-based catalog hint building); `POST/GET
+.../classify`, `POST .../classify/confirm`.
+
+**Three real bugs found and fixed this phase** (full detail in `AI-USAGE.md` §5):
+1. Passing the whole free-text business description as one literal search query
+   returned zero catalog hints -- found by manually running the real end-to-end flow,
+   not by any test (every existing test handed hints in directly). Fixed with
+   per-keyword search + union, added a regression test, re-verified live.
+2. `finishReason: MAX_TOKENS` was thrown as a hard exception, which skipped the
+   repair-retry path entirely despite a comment claiming it triggered one -- caught by
+   this phase's own test suite failing, not by inspection.
+3. An `HttpRequestException`'s message was passed as `DomainException.Details`, which
+   `HttpErrorMapper` serializes straight into the client response -- a security-relevant
+   regression that copy-pasted a safety comment without copying the behavior it
+   described. Caught before ever running, during the build itself.
+
+**Verified for real against the live Gemini API** (not simulated): a full request
+through the entire real stack -- `POST /v1/applications/{id}/classify` →
+`ClassificationService` → `GeminiEvaluationProvider` → real HTTPS call → parsed,
+catalog-validated, persisted → HTTP response -- correctly classified a grocery-store
+description as MCC 5411, confidence 0.98. A separate real call returned an actual HTTP
+503 (free-tier overload), which the fallback-to-mock path correctly caught and
+degraded from, logged with the real reason. `POST .../classify/confirm` and
+`GET .../classify` both exercised against that real classification, including
+rejecting an unknown MCC code. The automated test suite itself never depends on any of
+this -- `TestEnvironment.cs` now forces `AI_PROVIDER=mock` unconditionally, so
+`dotnet test` stays fast/offline/deterministic; `GeminiEvaluationProvider` is
+separately unit-tested with a fake `HttpMessageHandler`.
+
+**Verified for real, standard checks:** `dotnet build` (0 warnings/errors),
+`dotnet test` -- 294/294 passing (up from 248), `sam validate --lint` against the
+updated template (new `AiApiKey`/`GeminiModel` parameters). Coverage 92.6%/82.2%
+(branch coverage dipped from 84.7% -- explained honestly in the README, not smoothed
+over: `GeminiEvaluationProvider` has more independent failure-mode branches than the
+test suite exercises every pairwise combination of).
+
+Merged to `main` with `--no-ff`, pushed.
