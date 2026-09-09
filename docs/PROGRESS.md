@@ -725,3 +725,80 @@ without fake-delay injection would have), coverage 94.49%/84.36% (flat vs. Phase
 default change.
 
 Merged to `main` with `--no-ff`, pushed.
+
+---
+
+## 2026-09-09 (same day, continued) — Phase 11 (frontend) built, verified live end-to-end, merged
+
+Discussed the stack with Osama before writing code, per his request ("تعال ندردش شوي
+عن الfrontend"): Vite + React + TypeScript over Next.js (this is a REST-backed SPA,
+not a site needing SSR/SEO); Tailwind v4 + shadcn/ui-style components for a premium
+"business" look he asked for ("بدي اشي فخم"); Zustand (his explicit ask) for UI-only
+state alongside TanStack Query for server state; react-hook-form + zod; `motion` for
+animation, kept deliberately restrained per his instruction ("انيميشن حلو ومرتب ما
+يكون قوي") with exactly one bigger celebratory moment reserved for a successful
+submission.
+
+**What got built:** The full 6-step wizard (`frontend/src/`) -- Applicant, Business,
+Documents, Classification, Rate Evaluation, Review & Submit -- each step reading and
+writing the real backend via `src/hooks/use-application.ts` (TanStack Query), with
+client-side zod validation mirroring `Applicant.cs`/`Business.cs`'s exact field rules.
+A premium visual identity: warm ivory/near-black base, deep royal-indigo primary,
+champagne-gold accent reserved for premium/success moments, Fraunces serif headings
+against Inter body text. An animated sidebar stepper with spring-in checkmarks and an
+animated connector-line fill; step transitions slide+fade; MCC confidence bars animate
+their width in; a genuinely bigger, confetti-adjacent celebration animation on
+successful submission only. Document upload reports real progress (XHR upload
+events, not simulated) against real pre-signed URLs.
+
+**A real backend gap found and closed while building this:** no client-facing route
+ever listed an application's documents -- `SubmissionService` used
+`IDocumentRepository.ListByApplicationIdAsync` internally since Phase 9, but nothing
+exposed it over HTTP, so a resumed session had no way to discover which documents were
+already uploaded (the brief's own "preserve state so a partially completed application
+can be resumed" requirement). Added `GET /v1/applications/{id}/documents`
+(`DocumentService.ListDocumentsAsync`, `DocumentEndpoints.cs`), same
+404-on-unknown-parent convention as every sibling endpoint, with its own three new
+endpoint tests.
+
+**Verified for real, end-to-end, through the actual rendered UI, not just API calls:**
+stood up MinIO (S3-compatible) and DynamoDB Local in Docker, pointed the backend at
+both (`PERSISTENCE_PROVIDER=dynamodb`, `S3_SERVICE_URL`, `DYNAMODB_SERVICE_URL`), and
+drove the complete journey through a real browser: create application -> fill
+applicant -> fill business -> upload all three required documents through the real
+presign -> MinIO -> complete flow -> get an MCC suggestion -> confirm it -> run risk
+evaluation -> submit. Confirmed via a direct `GET /v1/applications/{id}` afterward that
+the backend genuinely returned `"status":"Submitted"`. This is the first real
+S3-compatible upload in this project's history -- closes the single longest-standing
+Known Gap in the README ("no real S3 bucket has ever received an actual uploaded
+byte"). The three document uploads were also independently verified via raw `curl`
+(matching exactly what the browser's `uploadToPresignedUrl` sends), confirming the
+mechanics were correct before ever touching the browser.
+
+**Two real bugs found by actually testing, not by inspection:**
+1. A mobile layout bug (375px viewport): the document status badge visually overlapped
+   a wrapped two-line document title. Root cause: a `flex items-center` row centers a
+   short right-hand column against a now-two-line-tall left column, landing the badge
+   mid-overlap rather than at the top. Fixed by restructuring `DocumentsStep.tsx`'s
+   `DocumentCard` to stack badge/button below the title on narrow screens instead of
+   sitting beside it.
+2. A longstanding README documentation bug: every curl example across the whole
+   document used port 5280, but the real `dotnet run --project src/Gweb.Api` port
+   (confirmed by actually starting it and reading the log) is 5243, from
+   `Properties/launchSettings.json`. Fixed with a global replace (23 occurrences).
+
+**Also hit and worked around:** this MinIO version's bucket-CORS configuration API
+(`mc cors set`) rejected every configuration tried, so a real browser's cross-origin
+upload to `localhost:9000` would have been blocked. Worked around with a Vite
+dev-server proxy plus a small same-origin URL rewrite, local-dev-only and documented
+as such -- see `docs/adr/0010-frontend-architecture.md`.
+
+**Verified for real, standard checks:** `npx tsc -b --noEmit` clean, `npm run build`
+clean (685KB/215KB gzipped single bundle, flagged as unsplit but acceptable at this
+app's size). Backend: `dotnet build` clean, `dotnet test` -- 395/395 passing (up from
+392 -- three new `ListDocumentsAsync` endpoint tests).
+
+`docs/adr/0010-frontend-architecture.md` documents the full stack rationale, the
+shadcn CLI bugs worked around, and the MinIO CORS workaround.
+
+Merged to `main` with `--no-ff`, pushed.

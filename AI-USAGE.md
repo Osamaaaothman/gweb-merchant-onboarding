@@ -51,6 +51,7 @@ Be specific per area, not generic.
 | Rate evaluation + risk signals (Phase 8) | Extended `IEvaluationProvider` with real multimodal statement extraction -- `GeminiEvaluationProvider` sends the actual document bytes to Gemini as an inline part, verified directly against the live API (a realistic synthetic statement extracted exactly, ~6s). `EffectiveRateCalculator` is pure/deterministic (never reads AI commentary, only 5 numeric fields); `RiskSignalDetector` computes every brief-named signal category from data already in the system (not an AI judgment call), each citing a `sourceField`. New `Gweb.Domain.Documents.IDocumentStorage.DownloadObjectAsync` (full bytes, size-capped, distinct from the existing 16-byte signature-check read). `POST /v1/applications/{id}/evaluate` (202+Processing async-fallback contract when budget is too low to attempt), `GET .../evaluation` | *(Osama: fill in)* |
 | Submission gate + normalized review payload (Phase 9) | Generated the real "list documents for an application" DynamoDB `Query` (`IDocumentRepository.ListByApplicationIdAsync`) that ADR-0003 planned since Phase 2 but no caller needed until now; `SubmissionChecker` (reuses the existing `CompletenessChecker` for applicant/business, adds required-document logic on top -- Government ID, Business Registration, Bank Evidence only, Conditional types explicitly out of scope, documented in ADR-0008); `IApplicationRepository.UpdateAsync` as a deliberate third method alongside `CreateAsync`/`GetByIdAsync` rather than retrofitting `Application` onto the `SaveAsync`/`expectedVersion=0` convention every other entity uses; `SubmissionService` orchestrating the full check-then-submit flow; `POST /v1/applications/{id}/submit` returning the normalized review payload (masked applicant/business, every document, current classification/evaluation) instead of a new aggregate GET route, since the brief's literal API surface lists only `POST /submit`. Applied the Phase 8 namespace-collision lesson proactively this time (differently-named aliases `DomainDocument`/`DomainEvaluation` from the start, not same-named ones) -- no repeat of that bug. One minor `CA1859` analyzer fix in test helpers; no behavioral bugs found this phase -- build and all 383 tests passed clean on the first run after each incremental addition | *(Osama: fill in)* |
 | Deadline hardening + bounded retry (Phase 10) | Audited every DynamoDB/S3/Gemini call site for budget propagation -- found no gaps, all already routed through a budget-derived timeout since the phase each adapter was built. Built `Gweb.Shared.Resilience.BoundedRetry` (budget-aware bounded retry, exponential backoff with full jitter, reusing the existing `DomainException.Retryable` flag as the retry-worthiness signal) and wired it into the Gemini adapter only -- deliberately not into DynamoDB/S3, since the AWS SDK already retries those internally and a second app-level retry layer on top would risk uncoordinated retry amplification rather than add safety; documented as a real architectural decision in ADR-0009, not an oversight. Added the third hanging-dependency test (S3, closing the one gap the audit found -- DynamoDB and Gemini already had one each). Also switched the default Gemini model from `gemini-3.6-flash` (20 free requests/day) to `gemini-3.5-flash-lite` (500/day, verified live against the real API before switching) after Osama reported the actual daily quota mid-session -- see ADR-0006's addendum | *(Osama: fill in)* |
+| Frontend (Phase 11) | Discussed stack with Osama before writing code (Vite+React+TS not Next.js; Tailwind v4 + hand-authored shadcn/ui-style primitives, not the CLI, after it broke twice; TanStack Query for server state, Zustand for UI-only state, react-hook-form+zod mirroring backend validation, `motion` used narrowly per Osama's explicit "tidy, not overpowering" instruction). Built the full 6-step wizard (`frontend/src/components/steps/*`) wired to the real backend, no mocked data. Found and closed a real backend gap while building it: no client-facing route ever listed an application's documents, needed for the brief's "resume state" requirement -- added `GET /v1/applications/{id}/documents` (`DocumentService.ListDocumentsAsync`, its own endpoint tests). Stood up MinIO + DynamoDB Local in Docker and drove the entire journey (create -> applicant -> business -> 3 real document uploads -> classify -> confirm -> evaluate -> submit) through the actual rendered UI in a real browser, confirmed via a direct `GET` afterward that the backend genuinely shows `"status":"Submitted"` -- the first real S3-compatible upload in this project's history. Found and fixed one real mobile layout bug (status badge overlapping a wrapped two-line document title below `sm:`) and one real, longstanding README documentation bug (every curl example used port 5280; the real `dotnet run` port is 5243) -- both caught by actually running things, not by inspection | *(Osama: fill in)* |
 
 *(Osama: the "My involvement" column is intentionally blank — Claude should not write
 this in your voice. Fill it in with what you actually reviewed, questioned, or would
@@ -409,6 +410,47 @@ built-in retry, and the one that has actually hit a real transient failure in th
 project) rather than building a second, uncoordinated retry layer on top of the SDK's
 own for the other two. Documented in ADR-0009 rather than left as an unstated
 assumption.
+
+---
+
+**Issue:** The `shadcn@latest` CLI (v4.21.0) failed twice while setting up the frontend
+UI primitives. `npx shadcn init -d --force` wrote a valid `components.json` and then
+itself errored with "Could not load the workspace config in ... Add components.json to
+this workspace ... then try again" -- even though it had just written exactly that
+file. Retrying `npx shadcn add button --yes` against that same `components.json`
+partially worked (installed dependencies, generated a component) but resolved the
+project's own `@/*` path alias incorrectly, writing the output to a literal
+`./@/components/ui/button.tsx` directory instead of `./src/components/ui/button.tsx`.
+**Why it mattered:** Trusting the CLI's silent "success" here would have left dead code
+in a directory nothing imports from, discovered only much later when a component
+"add" appeared to work but nothing rendered.
+**What I did:** *(Osama: fill in)*
+**Fix:** Abandoned the CLI, deleted the stray `./@/` directory, and hand-authored every
+`src/components/ui/*.tsx` primitive directly against the Radix packages the CLI would
+have installed, following shadcn's own published "new-york" style source -- the
+copy-in-your-repo model this library is built around anyway, so writing the files
+directly is not a lesser approach, just a manual one.
+
+---
+
+**Issue:** Verifying real S3-compatible uploads required MinIO's own bucket-CORS
+configuration (`mc cors set`), which rejected every `AllowedOrigin`/`AllowedHeader`
+combination tried -- including the most permissive (`*`/`*`) and the most minimal
+(no `AllowedHeader` at all) -- with the same opaque error: "A header you provided
+implies functionality that is not implemented."
+**Why it mattered:** Without working CORS, a real browser's cross-origin upload to
+`localhost:9000` would be silently blocked by the browser itself, making it look like
+the upload code was broken when the actual cause was one specific MinIO build's
+incomplete S3 CORS API support.
+**What I did:** *(Osama: fill in)*
+**Fix:** Verified the underlying presign/upload/complete mechanics were correct first,
+independently, via raw `curl` directly against MinIO (bypassing the browser and its
+CORS enforcement entirely) -- confirming the real bug was CORS-specific, not a
+signature or field-ordering problem. Then added a Vite dev-server proxy plus a small
+same-origin URL rewrite (`toSameOriginUploadUrl` in `src/lib/api-client.ts`) so the
+browser's upload request never crosses origins during local development -- documented
+inline as a local-dev-only workaround that a real deployed frontend against real S3
+(or a working CORS setup) would never trigger.
 
 ---
 
