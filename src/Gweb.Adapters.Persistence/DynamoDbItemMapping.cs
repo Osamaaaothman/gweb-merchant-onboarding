@@ -36,6 +36,14 @@ internal static class DynamoDbItemMapping
         }
     }
 
+    public static void PutIfNotNull(this Dictionary<string, AttributeValue> item, string key, long? value)
+    {
+        if (value is not null)
+        {
+            item[key] = new AttributeValue { N = value.Value.ToString(CultureInfo.InvariantCulture) };
+        }
+    }
+
     public static void PutIfNotNull(this Dictionary<string, AttributeValue> item, string key, DateOnly? value)
     {
         if (value is not null)
@@ -68,6 +76,9 @@ internal static class DynamoDbItemMapping
 
     public static int? GetOptionalInt(this Dictionary<string, AttributeValue> item, string key) =>
         item.TryGetValue(key, out var value) ? int.Parse(value.N, CultureInfo.InvariantCulture) : null;
+
+    public static long? GetOptionalLong(this Dictionary<string, AttributeValue> item, string key) =>
+        item.TryGetValue(key, out var value) ? long.Parse(value.N, CultureInfo.InvariantCulture) : null;
 
     public static DateOnly? GetOptionalDate(this Dictionary<string, AttributeValue> item, string key) =>
         item.TryGetValue(key, out var value) ? DateOnly.Parse(value.S, CultureInfo.InvariantCulture) : null;

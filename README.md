@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 3 — applicant & business intake.** This README grows with
+> **Status: Phase 4 — document upload & S3.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -38,8 +38,20 @@ one item type per aggregate member under a shared `APP#{id}` partition key — s
 [`docs/adr/0003-dynamodb-table-strategy.md`](docs/adr/0003-dynamodb-table-strategy.md)
 for the full access-pattern table. So far: `Application` (create + resume, Phase 2),
 `Applicant` and `Business` (full field set from the brief §3.1/§3.2, PATCH semantics,
-Phase 3). Document/Evaluation items land in later phases using the same table, no new
-IaC resource per entity.
+Phase 3), `Document` (presign/complete lifecycle, Phase 4, `DOC#{documentId}` sort key
+under the same `APP#{id}` partition). Evaluation items land in a later phase using the
+same table, no new IaC resource per entity.
+
+Documents follow the brief's exact lifecycle (`REQUESTED → UPLOADING → RECEIVED →
+PROCESSING → ACCEPTED | NEEDS_REVIEW | REJECTED`, `src/Gweb.Domain/Documents/Document.cs`).
+The client uploads straight to S3 via a pre-signed **POST** (not PUT — only a presigned
+POST can enforce a content-length-range condition, `src/Gweb.Adapters.Storage/S3DocumentStorage.cs`);
+Lambda never receives a document body. Content-Type, size range, and the client-declared
+SHA-256 checksum are all pinned as S3 policy conditions, so a mismatched upload is
+rejected by S3 itself before this system ever sees it. `complete()` re-verifies anyway
+(checksum via `ChecksumMode.ENABLED`, plus a 16-byte ranged read for a file-signature/magic-byte
+check) as defense in depth, and is idempotent — a repeat call after the document has
+left `Uploading` just returns the current record.
 
 Government ID numbers, EIN/UBI, and bank account numbers are **masked at capture**:
 the domain layer extracts only the last 4 characters the moment a PATCH request
@@ -243,6 +255,25 @@ curl -i -X PATCH http://localhost:5280/v1/applications/<id>/business \
 curl http://localhost:5280/v1/applications/<id>
 # -> 200, { id, status, ..., applicant: {...}, business: {...},
 #           completeness: { isComplete, missingApplicantFields: [...], missingBusinessFields: [...] } }
+
+# Request a pre-signed upload for a document -- Lambda never sees the bytes
+curl -i -X POST http://localhost:5280/v1/applications/<id>/documents/presign \
+  -H "Content-Type: application/json" \
+  -d '{"type":"BankEvidence","originalFilename":"voided-check.pdf","contentType":"application/pdf","declaredSizeBytes":48213,"declaredChecksumSha256Base64":"<base64-sha256-of-the-file>"}'
+# -> 201, { document: { id, status: "Uploading", ... }, uploadUrl, uploadFields: { key, Content-Type, x-amz-checksum-sha256, ... } }
+# The client then POSTs the actual file straight to `uploadUrl` as multipart/form-data,
+# with every entry in `uploadFields` as a form field alongside the file -- never through
+# this API.
+
+# After the client's direct-to-S3 upload finishes, confirm it landed and verify it
+curl -i -X POST http://localhost:5280/v1/applications/<id>/documents/<documentId>/complete
+# -> 200, { status: "Received", actualSizeBytes, uploadedAt, ... } on a verified match
+#    or   { status: "Rejected", rejectionReason: "..." } if checksum/size/signature disagree
+#    -- calling this again after either outcome is a no-op, safe to retry
+
+# Fetch a document's current lifecycle state
+curl http://localhost:5280/v1/applications/<id>/documents/<documentId>
+# -> 200, { id, applicationId, type, status, originalFilename, contentType, ... }
 ```
 
 ## Assumptions
@@ -277,6 +308,28 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 - **S3 CORS `AllowedOrigins` is `["*"]`.** Fine for local development against no fixed
   frontend origin yet; must be tightened to the real web app origin once one exists
   (Phase 11).
+- **Max upload size (25 MB, `Gweb.Domain.Documents.DocumentUploadLimits.MaxSizeBytes`)
+  is a deliberate, documented default, not a number from the brief** — the brief says
+  to validate size but never states a ceiling. Generous enough for a scanned PDF or
+  phone photo, bounded so a single upload stays well clear of Lambda's own memory/payload
+  limits. Trivial to change; it is one named constant, read from nowhere else.
+- **Phase 4's S3 code was not verified against a live AWS S3 bucket** in this session —
+  same situation as Phase 3's DynamoDB repositories (see below): what *is* verified is
+  `sam build` (real `dotnet publish` including `Gweb.Adapters.Storage`), `sam validate --lint`
+  on the updated IAM policy, and `S3DocumentStorageTests` round-tripping through a
+  mocked `IAmazonS3` built from the real AWS SDK request/response types — confirming
+  `CreatePresignedPostRequest`/`S3PostCondition`/`GetObjectMetadataRequest.ChecksumMode`/
+  `GetObjectRequest.ByteRange` are shaped exactly as the code assumes (checked against
+  the installed SDK's own XML docs, not memory). Worth an actual `sam local start-api`
+  + real S3 bucket run once Docker and an AWS account/profile are both available.
+- **IAM policies are unverified against real AWS.** `sam validate --lint` confirms the
+  template is well-formed, but nothing in this repo actually exercises whether
+  `ApiFunction`'s policy grants exactly the right actions end-to-end. This session
+  caught one real reasoning error before it shipped (the S3 policy initially omitted
+  `s3:PutObject`, on the wrong assumption that a presigned POST needs no grant on the
+  signer's own role — see `AI-USAGE.md` §5) purely by re-reasoning about SigV4, not by
+  a test. A real `sam deploy` + actual presigned-upload round trip is the only way to
+  be fully sure the policy is both sufficient and not over-broad.
 - **No authentication/authorization** — see Assumptions above.
 - **No AWS deployment executed.** Local-first per `docs/06-COLLABORATION-PROTOCOL.md`
   §3; a real `sam deploy` (and its teardown script) is scoped for Phase 13, contingent
@@ -318,24 +371,25 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 ## Test coverage
 
 Measured by running `dotnet test --collect:"XPlat Code Coverage" --settings
-coverlet.runsettings` (last run: 152 tests, all passing; generated-code excluded per
+coverlet.runsettings` (last run: 215 tests, all passing; generated-code excluded per
 `coverlet.runsettings`):
 
 | Assembly | Line coverage | Branch coverage |
 |---|---|---|
 | `Gweb.Services` | 100% | 100% |
 | `Gweb.Config` | 100% | 100% |
-| `Gweb.Adapters.Persistence` | 97.4% | 76.4% |
+| `Gweb.Adapters.Storage` | 100% | 100% |
 | `Gweb.Shared` | 99.3% | 95.7% |
-| `Gweb.Domain` | 88.9% | 87.1% |
-| `Gweb.Api` | 88.7% | 70.8% |
-| **Overall** | **92.2%** | **84.8%** |
+| `Gweb.Adapters.Persistence` | 97.8% | 78.8% |
+| `Gweb.Domain` | 89.8% | 86.7% |
+| `Gweb.Api` | 88.0% | 66.7% |
+| **Overall** | **92.4%** | **84.4%** |
 
-Both dropped from Phase 2's numbers with real, explainable causes, not a quality
-regression: `Gweb.Domain` grew by ~15 validation methods across `Applicant`/`Business`
-(each with several branches: null-skip, empty-reject, over-length-reject, valid-accept
-— not every permutation of ~30 fields has its own test, only the ones that exercise a
-genuinely distinct rule). `Gweb.Api`'s DTO `ToDomain()` mapping methods are thin
-pass-through code exercised indirectly by the endpoint tests rather than unit-tested
-in isolation. Numbers re-measured and reported per-phase; a stale percentage from an
-earlier phase is never left standing in for what a later phase actually covers.
+Roughly flat vs. Phase 3 (92.2%/84.8%), with the same kind of explainable variance:
+`Gweb.Api`'s branch coverage dipped slightly because `DocumentEndpoints.cs` adds a few
+error-path branches (unknown content type, oversized declared size, not-yet-uploaded)
+that aren't each independently exercised at the HTTP layer when the equivalent case is
+already covered at the `DocumentService` unit-test level (`CompleteThrowsWhenNoUploadHasLandedYet`,
+etc.) — covered logic, just not every branch covered *twice*. Numbers re-measured and
+reported per-phase; a stale percentage from an earlier phase is never left standing in
+for what a later phase actually covers.

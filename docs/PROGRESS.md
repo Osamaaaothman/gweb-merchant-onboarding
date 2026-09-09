@@ -303,3 +303,53 @@ beneficial-owner scoping, etc.) are ones he can actually explain later is now hi
 to manage, not something Claude can verify from here. `docs/INTERVIEW-NOTES.md`
 (personal prep, near the end per `docs/06-COLLABORATION-PROTOCOL.md` §7) is the right
 place to close this gap before submission -- worth revisiting then, not now.
+
+---
+
+## 2026-09-09 (same day, continued) — Phase 4 (Documents & S3) built and merged
+
+Picked up mid-implementation: `Document` domain entity/state machine, `AllowedContentTypes`,
+`DocumentKeyGenerator`, `FilenameSanitizer`, `FileSignatureValidator` were already
+written and committed (`016de54`) before the interruption that triggered this session's
+context compaction. Continued from there.
+
+**What got built this stretch:**
+- `Gweb.Adapters.Storage` project: `S3DocumentStorage` (presigned **POST**, not PUT --
+  verified against the installed `AWSSDK.S3` XML docs that only POST can carry a
+  content-length-range condition), `S3CallExecutor`, `InMemoryDocumentStorage`.
+- `DynamoDbDocumentRepository` / `InMemoryDocumentRepository` (same
+  snapshot-on-save/get + optimistic-concurrency pattern as every other repository).
+- `DocumentService` (`Gweb.Services.Documents`): presign validates content type/size/
+  checksum presence, creates the record, calls storage. `complete()` is idempotent (a
+  document that already left `Uploading` just returns as-is), verifies checksum + size
+  + file signature, and marks `Received` or `Rejected` accordingly -- rejection is a
+  normal `200` outcome, not an exception.
+- Endpoints: `POST /v1/applications/{id}/documents/presign`,
+  `POST /v1/applications/{id}/documents/{documentId}/complete`,
+  `GET /v1/applications/{id}/documents/{documentId}`.
+- IAM: `ApiFunction`'s policy extended with `s3:PutObject`/`s3:GetObject`/
+  `s3:GetObjectAttributes` scoped to the documents bucket ARN.
+
+**Two real mistakes caught before committing (full detail in `AI-USAGE.md` §5):**
+1. Guessed `CreatePresignedPostResponse`'s constructor and `Assert.StartsWith` on a
+   `byte[]` -- both compile errors, both fixed by checking the real API shape instead
+   of guessing twice.
+2. The first IAM policy draft granted only `s3:GetObject*`, reasoning that a presigned
+   POST needs no grant on the signer's own role. That reasoning is wrong -- SigV4
+   presigning authorizes the eventual request against the *signer's* permissions, so
+   without `s3:PutObject` every client upload would 403 at S3 despite a validly-signed
+   presign response. Caught by re-reasoning about how presigning actually works, not
+   by any test (nothing in this repo exercises the real IAM policy against real AWS --
+   now an explicit Known Gap).
+
+**Verified for real:** `dotnet build` (0 warnings, 0 errors, `TreatWarningsAsErrors`
+still on), `dotnet test` -- 215/215 passing (up from 152 at the Phase 3 merge; +63
+covering the domain, adapter, service, and HTTP-endpoint layers of this phase),
+`sam validate --lint` against the updated template. **Not verified:** a live AWS S3
+bucket -- see README "Known gaps" for exactly what stands in for that (mocked
+`IAmazonS3` built from the real SDK's own request/response types) and what it does not
+prove.
+
+Merged to `main` with `--no-ff` per `docs/01-GIT-WORKFLOW.md`; pushed per Osama's
+standing authorization ("ok now lets contenue also make the merge and pushes i dont
+wat to see anything incomplete now").
