@@ -34,11 +34,13 @@ Parameters:
 
   GeminiModel:
     Type: String
-    Default: gemini-3.6-flash
+    Default: gemini-3.5-flash-lite
     Description: >
       Only read when AiProvider=Gemini. An env var, not a hardcoded value, because
-      Google's free-tier model lineup has already changed once during this project's
-      build (see docs/adr/0006-ai-evaluation-provider.md) and will again.
+      Google's free-tier model lineup has already changed twice during this project's
+      build (see docs/adr/0006-ai-evaluation-provider.md) and will again. Defaults to
+      gemini-3.5-flash-lite (500 free requests/day) rather than the project's original
+      gemini-3.6-flash (only 20/day) -- easy to exhaust during grading/demoing.
 
   AiApiKey:
     Type: String

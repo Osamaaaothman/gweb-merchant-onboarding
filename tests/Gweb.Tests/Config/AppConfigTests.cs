@@ -17,7 +17,7 @@ public class LoadBaseConfigTests
         Assert.Equal(AiProvider.Mock, config.AiProvider);
         Assert.Equal(LogLevel.Info, config.LogLevel);
         Assert.Null(config.AiApiKey);
-        Assert.Equal("gemini-3.6-flash", config.GeminiModel);
+        Assert.Equal("gemini-3.5-flash-lite", config.GeminiModel);
     }
 
     [Fact]
