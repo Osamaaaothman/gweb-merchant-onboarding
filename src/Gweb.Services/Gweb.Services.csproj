@@ -1,6 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <!-- Domain interfaces only, never a concrete adapter. Wiring the real
+         implementation happens in Gweb.Api's composition root (Program.cs). -->
     <ProjectReference Include="..\Gweb.Domain\Gweb.Domain.csproj" />
     <ProjectReference Include="..\Gweb.Shared\Gweb.Shared.csproj" />
   </ItemGroup>

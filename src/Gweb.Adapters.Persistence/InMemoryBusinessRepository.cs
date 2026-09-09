@@ -11,8 +11,10 @@ public sealed class InMemoryBusinessRepository : IBusinessRepository
 
     public Task<Business?> GetByApplicationIdAsync(Guid applicationId, DeadlineBudget budget, CancellationToken cancellationToken = default)
     {
+        // Return a snapshot, not the stored reference -- see
+        // InMemoryApplicantRepository.GetByApplicationIdAsync for why.
         _store.TryGetValue(applicationId, out var business);
-        return Task.FromResult(business);
+        return Task.FromResult(business?.Snapshot());
     }
 
     public Task SaveAsync(Business business, long expectedVersion, DeadlineBudget budget, CancellationToken cancellationToken = default)

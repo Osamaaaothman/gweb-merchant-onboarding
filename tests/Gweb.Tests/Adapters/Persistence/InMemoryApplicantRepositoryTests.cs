@@ -68,6 +68,27 @@ public class InMemoryApplicantRepositoryTests
     }
 
     [Fact]
+    public async Task MutatingAnObjectReturnedByGetDoesNotAffectTheStoredCopy()
+    {
+        // Regression test: an earlier version of GetByApplicationIdAsync returned the
+        // stored reference directly. A caller mutating it (e.g. via ApplyUpdate,
+        // which is exactly what ApplicantService does before calling SaveAsync)
+        // silently corrupted the "persisted" state before the optimistic-concurrency
+        // check even ran.
+        var repository = new InMemoryApplicantRepository();
+        var applicant = Applicant.CreateEmpty(Guid.NewGuid(), DateTimeOffset.UtcNow, "actor", "corr-1");
+        applicant.ApplyUpdate(new ApplicantUpdate(LegalFirstName: "Jane"), DateTimeOffset.UtcNow);
+        await repository.SaveAsync(applicant, expectedVersion: 0, Budget());
+
+        var loaded = await repository.GetByApplicationIdAsync(applicant.ApplicationId, Budget());
+        loaded!.ApplyUpdate(new ApplicantUpdate(LegalFirstName: "Mutated After Get"), DateTimeOffset.UtcNow);
+
+        var stillStored = await repository.GetByApplicationIdAsync(applicant.ApplicationId, Budget());
+        Assert.Equal("Jane", stillStored!.LegalFirstName);
+        Assert.Equal(1, stillStored.Version);
+    }
+
+    [Fact]
     public async Task RejectsAnUpdateAgainstAStaleVersion()
     {
         var repository = new InMemoryApplicantRepository();

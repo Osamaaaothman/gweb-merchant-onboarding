@@ -27,7 +27,9 @@ public sealed class InMemoryApplicationRepository : IApplicationRepository
 
     public Task<Application?> GetByIdAsync(Guid id, DeadlineBudget budget, CancellationToken cancellationToken = default)
     {
+        // Return a snapshot, not the stored reference -- see
+        // InMemoryApplicantRepository.GetByApplicationIdAsync for why.
         _store.TryGetValue(id, out var application);
-        return Task.FromResult(application);
+        return Task.FromResult(application?.Snapshot());
     }
 }
