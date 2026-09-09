@@ -1,0 +1,706 @@
+openapi: 3.0.3
+info:
+  title: GWEB Merchant Onboarding & Underwriting Intake Layer
+  description: >
+    Intake and decision-support prototype -- collects applicant/business data,
+    accepts documents via pre-signed S3 uploads, classifies MCC, evaluates rate/risk,
+    and produces a normalized review payload on submission. Never performs
+    authoritative identity verification, credit decisions, or final approval; the
+    most positive terminal state is `Submitted` ("ready for manual review"). See
+    README.md and docs/ARCHITECTURE.md for full context.
+  version: "1.0"
+  license:
+    name: Confidential -- GWEB coding assessment
+servers:
+  - url: http://localhost:5243
+    description: Local (dotnet run)
+  - url: https://{apiId}.execute-api.{region}.amazonaws.com/{stage}
+    description: Deployed (API Gateway HTTP API + Lambda)
+    variables:
+      apiId: { default: your-api-id }
+      region: { default: us-east-1 }
+      stage: { default: dev }
+
+tags:
+  - name: Applications
+  - name: Documents
+  - name: MCC
+  - name: Classification
+  - name: Evaluation
+  - name: Health
+
+paths:
+  /v1/health:
+    get:
+      tags: [Health]
+      summary: Liveness/deadline-budget check
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  correlationId: { type: string, format: uuid }
+                  remainingBudgetMs: { type: integer }
+
+  /v1/applications:
+    post:
+      tags: [Applications]
+      summary: Create a new application
+      description: No request body. Returns the new application's ID -- the resume key for the rest of the journey.
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApplicationSummary" }
+
+  /v1/applications/{id}:
+    get:
+      tags: [Applications]
+      summary: Retrieve the full normalized application state (resume)
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApplicationDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+
+  /v1/applications/{id}/applicant:
+    patch:
+      tags: [Applications]
+      summary: Partially update applicant / control-person fields
+      description: >
+        Every field is optional -- only fields present in the body are validated and
+        applied; a partial batch never applies if any provided field is invalid.
+        Government ID is masked to last4 in the response; the full number is never
+        stored or returned again.
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PatchApplicantRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApplicantResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/applications/{id}/business:
+    patch:
+      tags: [Applications]
+      summary: Partially update business / legal-entity fields
+      description: Same partial-update semantics as applicant. EIN/UBI and bank account number masked to last4 in the response.
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PatchBusinessRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BusinessResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/applications/{id}/submit:
+    post:
+      tags: [Applications]
+      summary: Validate completeness and lock the application for manual review
+      description: >
+        Blocked (400) until the applicant, business, and all three required document
+        types (GovernmentId, BusinessRegistration, BankEvidence) are complete -- the
+        error body's `details` names every missing field/document precisely. On
+        success, returns the normalized review payload (masked applicant/business,
+        every document, current MCC classification, current evaluation) and locks the
+        application at `Submitted`. A second submit returns 409, never a silent no-op.
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      responses:
+        "200":
+          description: Submitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmitResponse" }
+        "400":
+          description: Blocked -- required items still missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmissionBlockedError" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/applications/{id}/documents/presign:
+    post:
+      tags: [Documents]
+      summary: Create a restricted, pre-signed S3 upload target
+      description: >
+        The client then POSTs the actual file as multipart/form-data directly to
+        `uploadUrl`, with every entry in `uploadFields` set as a form field ahead of
+        `file` -- never through this API. Lambda never receives document bytes.
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PresignDocumentRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PresignedUploadResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/applications/{id}/documents/{documentId}/complete:
+    post:
+      tags: [Documents]
+      summary: Confirm and verify a completed direct-to-S3 upload
+      description: >
+        Re-verifies checksum, size, and file signature against what actually landed
+        in S3 -- a mismatch transitions the document to `Rejected` (still a 200, not
+        an error) rather than silently accepting it. Idempotent: a repeat call after
+        the document has left `Uploading` just returns the current record.
+      parameters:
+        - { $ref: "#/components/parameters/ApplicationId" }
+        - { $ref: "#/components/parameters/DocumentId" }
+      responses:
+        "200":
+          description: OK (Received or Rejected -- see description)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentResponse" }
+        "400":
+          description: No upload found yet at the presigned location
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/applications/{id}/documents/{documentId}:
+    get:
+      tags: [Documents]
+      summary: Fetch a single document's current lifecycle state
+      parameters:
+        - { $ref: "#/components/parameters/ApplicationId" }
+        - { $ref: "#/components/parameters/DocumentId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DocumentResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/applications/{id}/documents:
+    get:
+      tags: [Documents]
+      summary: List every document uploaded for an application
+      description: >
+        Added in Phase 11 -- the access pattern was planned since Phase 2
+        (docs/adr/0003-dynamodb-table-strategy.md) but no client-facing route existed
+        until the frontend needed it to render document status on a resumed session.
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      responses:
+        "200":
+          description: OK (possibly empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DocumentResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/mcc:
+    get:
+      tags: [MCC]
+      summary: Search the MCC catalog
+      description: By code, code prefix, or description substring. No query returns the first 25 codes ordered by code (a browsing default).
+      parameters:
+        - name: query
+          in: query
+          required: false
+          schema: { type: string }
+          example: grocery
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McSearchResponse" }
+
+  /v1/applications/{id}/classify:
+    post:
+      tags: [Classification]
+      summary: Propose an MCC based on the business profile
+      description: >
+        Requires the business description to be filled in first. Grounded against the
+        real catalog -- a hallucinated/invalid code is never persisted. Falls back to
+        the mock provider (labelled `"proposedProvider": "mock"`) if the real provider
+        fails for any reason. Candidates with no genuine keyword match in the catalog
+        are capped at 35% confidence with an honest explanation, never presented as a
+        confident answer.
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McClassificationResponse" }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      tags: [Classification]
+      summary: Retrieve the current classification state without re-running it
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McClassificationResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/applications/{id}/classify/confirm:
+    post:
+      tags: [Classification]
+      summary: Confirm the proposed MCC, or correct it to a different real code
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mccCode]
+              properties:
+                mccCode: { type: string, example: "5411" }
+      responses:
+        "200":
+          description: OK -- hasMismatch is true if this differs from the proposed code
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McClassificationResponse" }
+        "400":
+          description: mccCode is not a real code in the catalog
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+
+  /v1/applications/{id}/evaluate:
+    post:
+      tags: [Evaluation]
+      summary: Run rate/business evaluation, optionally against an uploaded statement
+      description: >
+        Runs risk-signal detection even with no processing statement. If the remaining
+        deadline budget is too low to attempt evaluation at all, returns 202 with the
+        record marked `Processing` -- poll GET .../evaluation.
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                processingStatementDocumentId: { type: string, format: uuid, nullable: true }
+      responses:
+        "200":
+          description: Completed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvaluationResponse" }
+        "202":
+          description: Processing -- budget too low to attempt synchronously, poll GET
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvaluationResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/applications/{id}/evaluation:
+    get:
+      tags: [Evaluation]
+      summary: Retrieve the current evaluation state without re-running it
+      parameters: [{ $ref: "#/components/parameters/ApplicationId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvaluationResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  parameters:
+    ApplicationId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    DocumentId:
+      name: documentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    ValidationFailed:
+      description: Malformed input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    Conflict:
+      description: Optimistic-concurrency conflict (e.g. already submitted)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+
+  schemas:
+    ErrorBody:
+      type: object
+      description: The one shape every error response takes (HttpErrorMapper). Never contains a stack trace, table name, bucket name, or ARN.
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: VALIDATION_FAILED }
+            message: { type: string }
+            details: { nullable: true }
+        correlationId: { type: string, format: uuid, nullable: true }
+
+    SubmissionBlockedError:
+      allOf:
+        - { $ref: "#/components/schemas/ErrorBody" }
+        - type: object
+          description: "`details` on a blocked submit is exactly this shape."
+          example:
+            error:
+              code: VALIDATION_FAILED
+              message: Application is not ready for submission.
+              details:
+                missingApplicantFields: []
+                missingBusinessFields: []
+                missingRequiredDocuments: [BankEvidence]
+            correlationId: "..."
+
+    Address:
+      type: object
+      properties:
+        line1: { type: string }
+        line2: { type: string, nullable: true }
+        city: { type: string }
+        state: { type: string }
+        postalCode: { type: string }
+        country: { type: string }
+
+    ApplicationSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [InProgress, Submitted] }
+        version: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        correlationId: { type: string, format: uuid }
+
+    ApplicantResponse:
+      type: object
+      description: Never carries a full government ID number -- only type + last4.
+      properties:
+        legalFirstName: { type: string, nullable: true }
+        legalMiddleName: { type: string, nullable: true }
+        legalLastName: { type: string, nullable: true }
+        dateOfBirth: { type: string, format: date, nullable: true }
+        residentialAddress: { allOf: [{ $ref: "#/components/schemas/Address" }], nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        roleTitle: { type: string, nullable: true }
+        ownershipPercentage: { type: number, nullable: true }
+        governmentId:
+          type: object
+          nullable: true
+          properties:
+            type: { type: string, enum: [DriversLicense, Passport, NationalId] }
+            last4: { type: string }
+        consentVersion: { type: string, nullable: true }
+        version: { type: integer }
+
+    BusinessResponse:
+      type: object
+      description: Never carries a full EIN/UBI or bank account number -- only masked/last4 forms.
+      properties:
+        legalBusinessName: { type: string, nullable: true }
+        dbaName: { type: string, nullable: true }
+        entityType: { type: string, nullable: true, enum: [Llc, Corporation, Partnership, SoleProprietor, Nonprofit, Other] }
+        formationCountry: { type: string, nullable: true }
+        formationState: { type: string, nullable: true }
+        registrationIdentifier:
+          type: object
+          nullable: true
+          properties:
+            type: { type: string, enum: [Ein, StateUbi, Other] }
+            maskedValue: { type: string, example: "**-***6789" }
+        registeredAddress: { allOf: [{ $ref: "#/components/schemas/Address" }], nullable: true }
+        operatingAddress: { allOf: [{ $ref: "#/components/schemas/Address" }], nullable: true }
+        websiteUrl: { type: string, nullable: true }
+        businessDescription: { type: string, nullable: true }
+        businessStartDate: { type: string, format: date, nullable: true }
+        volumeProfile:
+          type: object
+          nullable: true
+          properties:
+            expectedAnnualCardVolume: { type: number }
+            averageTicket: { type: number }
+            highestTicket: { type: number }
+            monthlyTransactionCount: { type: integer }
+            cardPresentPercentage: { type: number }
+            ecommercePercentage: { type: number }
+        beneficialOwners:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              roleTitle: { type: string }
+              ownershipPercentage: { type: number }
+        settlementBankAccount:
+          type: object
+          nullable: true
+          properties:
+            accountHolder: { type: string }
+            bankName: { type: string }
+            last4: { type: string }
+            statementDate: { type: string, format: date }
+        existingProcessor: { type: string, nullable: true }
+        version: { type: integer }
+
+    PatchApplicantRequest:
+      type: object
+      description: Every field optional; only provided fields are validated and applied.
+      properties:
+        legalFirstName: { type: string, nullable: true }
+        legalMiddleName: { type: string, nullable: true }
+        legalLastName: { type: string, nullable: true }
+        dateOfBirth: { type: string, format: date, nullable: true }
+        residentialAddress: { allOf: [{ $ref: "#/components/schemas/Address" }], nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        roleTitle: { type: string, nullable: true }
+        ownershipPercentage: { type: number, nullable: true, minimum: 0, maximum: 100 }
+        governmentId:
+          type: object
+          nullable: true
+          properties:
+            type: { type: string, enum: [DriversLicense, Passport, NationalId] }
+            number: { type: string, minLength: 4, description: "Full number -- discarded after masking to last4, never stored or logged." }
+        consentVersion: { type: string, nullable: true }
+
+    PatchBusinessRequest:
+      type: object
+      description: Every field optional; only provided fields are validated and applied.
+      properties:
+        legalBusinessName: { type: string, nullable: true, maxLength: 200 }
+        dbaName: { type: string, nullable: true, maxLength: 200 }
+        entityType: { type: string, nullable: true, enum: [Llc, Corporation, Partnership, SoleProprietor, Nonprofit, Other] }
+        formationCountry: { type: string, nullable: true, maxLength: 200 }
+        formationState: { type: string, nullable: true, maxLength: 200 }
+        registrationIdentifier:
+          type: object
+          nullable: true
+          properties:
+            type: { type: string, enum: [Ein, StateUbi, Other] }
+            value: { type: string, minLength: 4, description: "Full identifier -- discarded after masking, never stored or logged." }
+        registeredAddress: { allOf: [{ $ref: "#/components/schemas/Address" }], nullable: true }
+        operatingAddress: { allOf: [{ $ref: "#/components/schemas/Address" }], nullable: true }
+        websiteUrl: { type: string, nullable: true, format: uri }
+        businessDescription: { type: string, nullable: true, maxLength: 2000 }
+        businessStartDate: { type: string, format: date, nullable: true }
+        volumeProfile:
+          type: object
+          nullable: true
+          properties:
+            expectedAnnualCardVolume: { type: number, minimum: 0 }
+            averageTicket: { type: number, minimum: 0 }
+            highestTicket: { type: number, minimum: 0, description: "Must not be less than averageTicket." }
+            monthlyTransactionCount: { type: integer, minimum: 0 }
+            cardPresentPercentage: { type: number, minimum: 0, maximum: 100 }
+            ecommercePercentage: { type: number, minimum: 0, maximum: 100 }
+        beneficialOwners:
+          type: array
+          nullable: true
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              roleTitle: { type: string }
+              ownershipPercentage: { type: number, minimum: 0, maximum: 100 }
+        settlementBankAccount:
+          type: object
+          nullable: true
+          properties:
+            accountHolder: { type: string }
+            bankName: { type: string }
+            accountNumber: { type: string, minLength: 4, description: "Full account number -- discarded after masking to last4, never stored or logged." }
+            statementDate: { type: string, format: date }
+        existingProcessor: { type: string, nullable: true, maxLength: 200 }
+
+    CompletenessResponse:
+      type: object
+      properties:
+        isComplete: { type: boolean }
+        missingApplicantFields: { type: array, items: { type: string } }
+        missingBusinessFields: { type: array, items: { type: string } }
+
+    ApplicationDetail:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [InProgress, Submitted] }
+        version: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        applicant: { allOf: [{ $ref: "#/components/schemas/ApplicantResponse" }], nullable: true }
+        business: { allOf: [{ $ref: "#/components/schemas/BusinessResponse" }], nullable: true }
+        completeness: { $ref: "#/components/schemas/CompletenessResponse" }
+        correlationId: { type: string, format: uuid }
+
+    PresignDocumentRequest:
+      type: object
+      required: [type, originalFilename, contentType, declaredSizeBytes, declaredChecksumSha256Base64]
+      properties:
+        type: { type: string, enum: [GovernmentId, BusinessRegistration, BusinessLicense, BankEvidence, ProcessingStatement, AdditionalEvidence] }
+        originalFilename: { type: string }
+        contentType: { type: string, enum: [application/pdf, image/jpeg, image/png] }
+        declaredSizeBytes: { type: integer, minimum: 1 }
+        declaredChecksumSha256Base64: { type: string, description: "Client-computed SHA-256 of the file, base64-encoded." }
+
+    DocumentResponse:
+      type: object
+      description: Never carries the S3 key or full checksum -- internal storage details with no client use case.
+      properties:
+        id: { type: string, format: uuid }
+        applicationId: { type: string, format: uuid }
+        type: { type: string, enum: [GovernmentId, BusinessRegistration, BusinessLicense, BankEvidence, ProcessingStatement, AdditionalEvidence] }
+        status: { type: string, enum: [Requested, Uploading, Received, Processing, Accepted, NeedsReview, Rejected] }
+        originalFilename: { type: string }
+        contentType: { type: string }
+        declaredSizeBytes: { type: integer }
+        actualSizeBytes: { type: integer, nullable: true }
+        uploadedAt: { type: string, format: date-time, nullable: true }
+        rejectionReason: { type: string, nullable: true }
+        version: { type: integer }
+
+    PresignedUploadResponse:
+      type: object
+      properties:
+        document: { $ref: "#/components/schemas/DocumentResponse" }
+        uploadUrl: { type: string, format: uri }
+        uploadFields:
+          type: object
+          additionalProperties: { type: string }
+          description: Every entry must be set as a form field, ahead of `file`, in the client's multipart/form-data POST to uploadUrl.
+
+    McCode:
+      type: object
+      properties:
+        code: { type: string, example: "5411" }
+        description: { type: string, example: "Grocery Stores, Supermarkets" }
+        category: { type: string, example: Retail }
+
+    McSearchResponse:
+      type: object
+      properties:
+        query: { type: string, nullable: true }
+        results: { type: array, items: { $ref: "#/components/schemas/McCode" } }
+
+    McClassificationCandidate:
+      type: object
+      properties:
+        mccCode: { type: string }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        explanation: { type: string }
+
+    McClassificationResponse:
+      type: object
+      properties:
+        candidates: { type: array, items: { $ref: "#/components/schemas/McClassificationCandidate" } }
+        proposedMccCode: { type: string, nullable: true }
+        proposedProvider: { type: string, nullable: true, enum: [mock, gemini] }
+        classifiedAt: { type: string, format: date-time, nullable: true }
+        selfSelectedMccCode: { type: string, nullable: true }
+        selfSelectedAt: { type: string, format: date-time, nullable: true }
+        hasMismatch: { type: boolean }
+        version: { type: integer }
+
+    StatementExtraction:
+      type: object
+      properties:
+        processor: { type: string, nullable: true }
+        monthlyVolume: { type: number, nullable: true }
+        discountRatePercent: { type: number, nullable: true }
+        perTransactionFee: { type: number, nullable: true }
+        monthlyFee: { type: number, nullable: true }
+        chargebackFeeTotal: { type: number, nullable: true }
+        statementPeriod: { type: string, nullable: true }
+        provider: { type: string, enum: [mock, gemini] }
+
+    EffectiveRate:
+      type: object
+      description: Pure deterministic arithmetic -- never reads AI-generated commentary.
+      properties:
+        totalMonthlyCostAmount: { type: number }
+        effectiveRatePercent: { type: number }
+        discountFeeAmount: { type: number }
+        transactionFeeAmount: { type: number }
+        monthlyFeeAmount: { type: number }
+        chargebackFeeAmount: { type: number }
+
+    RiskSignal:
+      type: object
+      description: Every signal cites the exact field/document that caused it (brief "no unexplained flags").
+      properties:
+        code: { type: string }
+        message: { type: string }
+        sourceField: { type: string }
+        sourceDocumentId: { type: string, format: uuid, nullable: true }
+
+    EvaluationResponse:
+      type: object
+      properties:
+        status: { type: string, enum: [Processing, Completed] }
+        extracted: { allOf: [{ $ref: "#/components/schemas/StatementExtraction" }], nullable: true }
+        calculated: { allOf: [{ $ref: "#/components/schemas/EffectiveRate" }], nullable: true }
+        commentary: { type: string, nullable: true }
+        riskSignals: { type: array, items: { $ref: "#/components/schemas/RiskSignal" } }
+        processingStatementDocumentId: { type: string, format: uuid, nullable: true }
+        evaluatedAt: { type: string, format: date-time, nullable: true }
+        version: { type: integer }
+
+    SubmitResponse:
+      type: object
+      description: The "normalized internal review payload" the brief asks a successful submission to produce.
+      properties:
+        applicationId: { type: string, format: uuid }
+        status: { type: string, enum: [Submitted] }
+        submittedAt: { type: string, format: date-time }
+        version: { type: integer }
+        applicant: { allOf: [{ $ref: "#/components/schemas/ApplicantResponse" }], nullable: true }
+        business: { allOf: [{ $ref: "#/components/schemas/BusinessResponse" }], nullable: true }
+        documents: { type: array, items: { $ref: "#/components/schemas/DocumentResponse" } }
+        classification: { allOf: [{ $ref: "#/components/schemas/McClassificationResponse" }], nullable: true }
+        evaluation: { allOf: [{ $ref: "#/components/schemas/EvaluationResponse" }], nullable: true }
