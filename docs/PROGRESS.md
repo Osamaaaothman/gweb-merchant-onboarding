@@ -801,4 +801,68 @@ app's size). Backend: `dotnet build` clean, `dotnet test` -- 395/395 passing (up
 `docs/adr/0010-frontend-architecture.md` documents the full stack rationale, the
 shadcn CLI bugs worked around, and the MinIO CORS workaround.
 
+---
+
+## 2026-09-09 (same day, continued) — Two real bugs found via live manual testing with Osama, plus a manual MCC search feature
+
+Osama manually tested the frontend against the running backend (MinIO + DynamoDB
+Local) and worked through it himself, deliberately probing edge cases -- exactly the
+kind of testing an automated suite alone doesn't replace.
+
+**Real bug 1: misleading classification confidence on a no-match fallback.** Osama
+typed "a gym serve athelates" as a business description and got back "0742 Veterinary
+Services" at 90% confidence. Traced to `ClassificationService.BuildCatalogHints`
+silently falling back to the catalog's browsing default (an arbitrary 25-code list)
+whenever every per-keyword search comes up empty ("gym" is 3 characters, below the
+4-character matching threshold; "athelates" is a typo for "athletes," and neither
+spelling nor "gym"/"fitness"/"athletic" appears anywhere in the catalog text --
+confirmed live against the real catalog) -- but nothing downstream knew a fallback had
+happened, so the provider confidently proposed one of those arbitrary codes at full
+confidence. Fixed with a `NoKeywordMatchConfidenceCeiling` (35%) applied generically in
+`ClassificationService` (the one place that already owns this kind of cross-cutting
+policy decision) whenever the fallback path was used -- the explanation is also
+replaced with an honest "no confident match" message. Two new tests cover both the
+capped and uncapped paths.
+
+**Real bug 2: a genuine 500 on GET, found setting up the classification test.** Any
+application whose Business had never had its `EntityType` explicitly set threw
+`ArgumentException: Requested value 'BUSINESS' was not found` on `GET
+/v1/applications/{id}`. Root cause: `DynamoDbBusinessRepository` has a local `const
+string EntityType = "BUSINESS"` (a write-only per-item record-type marker, the same
+copy-pasted pattern in all six DynamoDB repositories) that shares both its C#
+identifier *and* its DynamoDB attribute key with `Business`'s own real `EntityType`
+field -- the one domain entity, of six, whose real field happens to collide with this
+generic marker's name. Invisible to the whole automated suite (`InMemoryBusinessRepository`
+never round-trips through DynamoDB attribute maps at all) and to every prior manual
+test this session (the frontend's dropdown always defaults to `Llc`, so a real value
+was always set) -- only reachable by exercising the real DynamoDB-backed path with a
+genuinely partial business record, exactly what setting up a fresh test app for the
+classification sweep did. Same fix shape as the Phase 8 sibling-namespace shadowing
+gotcha: renamed the colliding identifier (`RecordTypeMarker`) and, more importantly,
+moved its DynamoDB attribute key off the shared `"entityType"` slot onto a
+non-colliding `"recordType"`. A new `Mock<IAmazonDynamoDB>` round-trip test reproduces
+the exact scenario.
+
+**Feature added in response to Osama's own question** ("لو ما تطابق يدخله يدوي؟" --
+if it doesn't match, can the user enter it manually?): `ClassificationStep.tsx` gained
+a live manual search box wired to `GET /v1/mcc?query=...`, showing real code + name +
+description + category as the applicant types, selectable and confirmable independent
+of whatever the automatic candidates suggested -- directly closes the gap the "gym"
+edge case exposed (searching "sport" surfaces 7941/7997, the correct codes, when the
+automatic keyword match had nothing to work with).
+
+**Verified for real:** a live sweep of 9 more business descriptions through the actual
+rendered UI (grocery, restaurant, bar, auto repair, pharmacy, hotel, gas station,
+casino/gambling, jewelry) -- 6 genuine exact matches, 2 partial (the correct code
+present but not ranked first -- "automotive" and generic words outweighing more
+specific ones like "repair"/"service station" in the naive keyword-overlap ranking),
+1 correct honest fallback. The manual search feature verified live too: searching
+"sport" returned real catalog results, selecting one updated the confirm button
+correctly.
+
+**Verified for real, standard checks:** `dotnet build` clean, `dotnet test` --
+398/398 passing (up from 397 -- Phase 11's original merge already added the
+list-documents tests; this round added two more for the confidence cap plus one for
+the DynamoDB round-trip fix). `npx tsc -b --noEmit` clean.
+
 Merged to `main` with `--no-ff`, pushed.

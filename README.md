@@ -94,6 +94,14 @@ system's proposed one are persisted (`McClassification`), so a mismatch is visib
 a reviewer. See [`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-evaluation-provider.md)
 for the full design, including a real empirical finding (this model's latency runs
 close to the system's 35s internal target) and how the code defends against it.
+When the business description has no genuine keyword match in the catalog at all
+(found via live testing, Phase 11: `ClassificationService` used to silently substitute
+the catalog's browsing default and let a provider propose one of those arbitrary codes
+at full confidence), every candidate's confidence is capped at 35% and its explanation
+replaced with an honest "no confident match" message -- an unrelated business
+description never again gets shown as a 90%-confidence answer. The frontend also lets
+the applicant search the real catalog directly (`GET /v1/mcc?query=...`) and pick a
+code by hand instead of relying on either provider at all.
 
 Rate evaluation (`POST /v1/applications/{id}/evaluate`) extends the same provider with
 real **multimodal** statement extraction -- `GeminiEvaluationProvider` sends the actual

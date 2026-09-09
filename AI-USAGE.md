@@ -454,6 +454,66 @@ inline as a local-dev-only workaround that a real deployed frontend against real
 
 ---
 
+**Issue:** Osama manually tested classification with a real, deliberately weird
+description ("a gym serve athelates") and got back "0742 Veterinary Services" at 90%
+confidence. Genuinely surprising output, not an obvious bug from reading the code --
+tracing it back: "gym" is 3 characters (below the 4-character keyword-matching
+threshold), "athelates" is a typo for "athletes," and neither spelling nor "gym"/
+"fitness"/"athletic" appears anywhere in the catalog's description text (verified
+directly against the live catalog via `curl` before touching any code). Every
+per-keyword search came up empty, so `ClassificationService.BuildCatalogHints` fell
+back to the catalog's browsing default (an arbitrary 25-code list) -- but nothing
+downstream knew that had happened, so the provider (mock or, just as much, a real
+Gemini call constrained to "choose only from this list") confidently proposed one of
+those arbitrary codes at the same confidence shape as a genuine match.
+**Why it mattered:** In an underwriting context, a wrong classification presented with
+90% confidence is actively misleading, not just imprecise -- worse than an honest "we
+don't know."
+**What I did:** *(Osama: fill in)*
+**Fix:** Added a `NoKeywordMatchConfidenceCeiling` (0.35) in `ClassificationService` --
+the one place that already owns this kind of cross-cutting policy decision (see the
+primary/fallback-provider logic above it). When `BuildCatalogHints` had to fall back to
+the browsing default, every resulting candidate's confidence is capped and its
+explanation replaced with an honest "no confident match" message, regardless of what
+confidence the provider itself claimed -- fixed uniformly for both mock and a real AI
+provider, since the cap applies to `suggestion.Candidates` generically. Two new tests
+(`ClassifyCapsConfidenceAndReplacesTheExplanationWhenNoKeywordGenuinelyMatched`,
+`ClassifyDoesNotCapConfidenceWhenAKeywordGenuinelyMatched`) cover both sides.
+
+---
+
+**Issue:** While setting up a fresh test application for a live classification sweep
+(Osama's own follow-up idea, testing many descriptions to prove classification isn't
+hardcoded), `GET /v1/applications/{id}` returned a real `500 Internal Server Error`:
+`ArgumentException: Requested value 'BUSINESS' was not found.` Root cause, found by
+reading `DynamoDbBusinessRepository.cs`: a local `private const string EntityType =
+"BUSINESS"` (a write-only per-item record-type marker, the same copy-pasted pattern
+used in all six DynamoDB repositories) shares both its C# identifier *and* its DynamoDB
+attribute key ("entityType") with `Business`'s own real `EntityType` field -- the one
+domain entity, of the six, whose real field happens to collide with this generic
+marker's name. `ToItem` writes the literal marker string first, then conditionally
+overwrites it with the real enum value only if `business.EntityType` is set; if it
+isn't (any business that hasn't reached that part of the form yet), the attribute is
+left holding the literal string `"BUSINESS"`, which `FromItem`'s
+`GetOptionalEnum<EntityType>("entityType")` then fails to parse as a real enum member.
+**Why it mattered:** Real (`InMemoryBusinessRepository`, used by the whole automated
+suite) never round-trips through DynamoDB attribute maps at all, so this was
+structurally invisible to 397 passing automated tests -- only reachable by exercising
+the real DynamoDB-backed code path, exactly what live end-to-end testing is for. Every
+prior manual test in this project happened to always set a real `EntityType` (the
+frontend's dropdown defaults to `Llc`), which is the only reason this hadn't already
+been found.
+**What I did:** *(Osama: fill in)*
+**Fix:** Same shape as the sibling-namespace shadowing gotcha documented above (Phase
+8) -- rename the colliding identifier. Renamed the const to `RecordTypeMarker` and,
+more importantly, moved its DynamoDB attribute key from the shared `"entityType"` to a
+non-colliding `"recordType"`, so the two concerns can never again write to the same
+slot. Added `SaveRoundTripsCorrectlyWhenEntityTypeHasNeverBeenSet`, a real
+`Mock<IAmazonDynamoDB>` round-trip test (matching the existing full-round-trip test's
+shape) reproducing exactly this scenario.
+
+---
+
 ## 6. Errors and weaknesses I found in AI suggestions
 
 Categories worth watching for, with real examples from this project:
