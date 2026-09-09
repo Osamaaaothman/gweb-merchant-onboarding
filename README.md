@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 8 — rate evaluation & risk signals.** This README grows with
+> **Status: Phase 9 — review & submit.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -110,6 +110,19 @@ top-level fields. If the deadline budget is too low to attempt evaluation at all
 endpoint returns `202` with the record marked `Processing`, pollable via `GET`. See
 [`docs/adr/0007-rate-evaluation-and-risk-signals.md`](docs/adr/0007-rate-evaluation-and-risk-signals.md).
 
+Submission (`POST /v1/applications/{id}/submit`) is a real gate, not a rubber stamp:
+blocked with the precise missing items (`400`, listing missing applicant fields,
+missing business fields, and missing required document types) until the applicant,
+business, and all three required documents (Government ID, Business Registration,
+Bank Evidence) are genuinely complete -- reusing the same `CompletenessChecker` the
+aggregate `GET` endpoint already uses, so what blocks submission can never drift from
+what a review screen would show as missing. A successful submission returns the
+**normalized review payload** the brief asks for (masked applicant/business, every
+document's status, the current MCC classification, the current evaluation) and locks
+the application at `Submitted` -- still no `Approved` state anywhere in this codebase,
+enforced structurally by `NoAutoApprovalPathTests`. See
+[`docs/adr/0008-submission-gate.md`](docs/adr/0008-submission-gate.md).
+
 Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
 [`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md),
@@ -117,7 +130,8 @@ ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runt
 [`docs/adr/0004-mcc-catalog-storage.md`](docs/adr/0004-mcc-catalog-storage.md),
 [`docs/adr/0005-risk-policy-representation.md`](docs/adr/0005-risk-policy-representation.md),
 [`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-evaluation-provider.md),
-[`docs/adr/0007-rate-evaluation-and-risk-signals.md`](docs/adr/0007-rate-evaluation-and-risk-signals.md).
+[`docs/adr/0007-rate-evaluation-and-risk-signals.md`](docs/adr/0007-rate-evaluation-and-risk-signals.md),
+[`docs/adr/0008-submission-gate.md`](docs/adr/0008-submission-gate.md).
 
 ## Tech stack
 
@@ -382,6 +396,27 @@ curl -i -X POST http://localhost:5280/v1/applications/<id>/evaluate \
 # Current evaluation state, without re-running evaluation
 curl http://localhost:5280/v1/applications/<id>/evaluation
 # -> 200, same shape as above; 404 NOT_FOUND if evaluate has never been called
+
+# Submit -- blocked while anything required is missing. 400, with the precise gap list
+curl -i -X POST http://localhost:5280/v1/applications/<id>/submit
+# -> 400 VALIDATION_FAILED, { error: { details: {
+#      missingApplicantFields: ["legalFirstName", ...],
+#      missingBusinessFields: [...],
+#      missingRequiredDocuments: ["GovernmentId", "BusinessRegistration", "BankEvidence"]
+#    } } }
+# Same 400 shape (with a shorter or empty list per category) as each requirement is
+# filled in -- applicant, business, and all three required documents (Government ID,
+# Business Registration, Bank Evidence; presign+complete each first, see above) all
+# have to be genuinely complete before this returns 200.
+
+# Submit again once applicant, business, and all three required documents are complete
+curl -i -X POST http://localhost:5280/v1/applications/<id>/submit
+# -> 200, the normalized review payload: { id, status: "Submitted",
+#      applicant: {...masked...}, business: {...masked...},
+#      documents: [ {...}, {...}, {...} ],
+#      classification: {...} | null, evaluation: {...} | null }
+# Application is now locked at Submitted -- calling submit again returns 409 CONFLICT,
+# not a second 200 or a silent no-op.
 ```
 
 ## Seeding / refreshing the MCC catalog
@@ -476,9 +511,16 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   2026-09-09). Root cause not determined; a minor SAM CLI/managed-runtime interaction,
   not a bug in this repo's code, but worth understanding before relying on that flag
   for anything else.
-- **`Application.Submit()` exists but is unreachable from the API** — no `POST
-  /v1/applications/{id}/submit` endpoint yet (Phase 9). The state-machine guard is
-  unit-tested directly against the domain type in the meantime.
+- **Conditional document types (Business License, Additional Evidence) are not
+  enforced by the submission gate.** The brief marks these "Conditional" on
+  jurisdiction/business-type, and this system has no rule engine to evaluate that --
+  only the three unconditionally-required types (Government ID, Business Registration,
+  Bank Evidence) block `POST /submit`. See ADR-0008.
+- **No aggregate "review screen" endpoint exists ahead of Phase 11's frontend.** The
+  granular endpoints (`GET /v1/applications/{id}`, `.../documents/{id}`,
+  `.../classify`, `.../evaluation`) already serve everything a review screen needs;
+  `POST /submit`'s own response *is* the normalized review payload the brief asks for.
+  See ADR-0008 for why no separate route was added for a UI that doesn't exist yet.
 - **Beneficial owners beyond the primary applicant are lightweight records** (name,
   role, ownership percentage only) embedded in the `Business` payload, not full
   Applicant-grade KYC profiles with their own DOB/address/government ID. The brief
@@ -527,12 +569,12 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   real `sam deploy`. A production setup should source it from SSM Parameter Store
   instead (the shape is already documented in `docs/06-COLLABORATION-PROTOCOL.md`), so
   the key never passes through a CloudFormation parameter, `NoEcho` or not.
-- **No "list documents by application + type" query exists** — `POST .../evaluate`
-  requires the caller to name the processing-statement document by ID (from their own
-  presign/complete response) rather than the server auto-discovering it. A real
-  document-browsing UI would want this; deferred rather than adding a new DynamoDB
-  access pattern under time pressure for a single-caller flow that already has the ID.
-  See ADR-0007.
+- **`POST .../evaluate` still requires the caller to name the processing-statement
+  document by ID** (from their own presign/complete response) rather than
+  auto-discovering it by type, even though `IDocumentRepository.ListByApplicationIdAsync`
+  now exists (built for the Phase 9 submission gate — see ADR-0008). Not wired into
+  `EvaluationService` because that flow already has the ID from its own caller; revisit
+  if a future caller doesn't. See ADR-0007.
 - **"Regulated-license claims without evidence" only checks for a keyword in the
   business description, not an actual missing license document** — the stronger
   version needs the same list-documents query named above. Still a genuinely useful
@@ -574,7 +616,7 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 ## Test coverage
 
 Measured by running `dotnet test --collect:"XPlat Code Coverage" --settings
-coverlet.runsettings` (last run: 355 tests, all passing; generated-code excluded per
+coverlet.runsettings` (last run: 383 tests, all passing; generated-code excluded per
 `coverlet.runsettings`):
 
 | Assembly | Line coverage | Branch coverage |
@@ -583,21 +625,21 @@ coverlet.runsettings` (last run: 355 tests, all passing; generated-code excluded
 | `Gweb.Adapters.Storage` | 100% | 100% |
 | `Gweb.Adapters.Mcc` | 100% | 88.9% |
 | `Gweb.Adapters.RiskPolicy` | 100% | 83.3% |
-| `Gweb.Shared` | 99.3% | 95.7% |
-| `Gweb.Services` | 96.5% | 85.7% |
-| `Gweb.Adapters.Persistence` | 98.6% | 78.6% |
-| `Gweb.Domain` | 91.8% | 88.2% |
-| `Gweb.Api` | 89.4% | 71.2% |
+| `Gweb.Shared` | 99.35% | 95.65% |
+| `Gweb.Services` | 97.22% | 85.71% |
+| `Gweb.Adapters.Persistence` | 98.6% | 80.35% |
+| `Gweb.Domain` | 91.95% | 88.32% |
+| `Gweb.Api` | 92.79% | 81.42% |
 | `Gweb.Adapters.Evaluation` | 90.9% | 54.0% |
-| **Overall** | **93.7%** | **83.0%** |
+| **Overall** | **94.5%** | **84.4%** |
 
-Up across the board this phase (93.7%/83.0% vs. Phase 7's 92.6%/82.2%) — the new
-domain code (`EffectiveRateCalculator`, `RiskSignalDetector`, `Evaluation`) is
-thoroughly covered by design (small, pure functions with explicit edge-case tests for
-the gate: zero-volume, missing-data, every named signal category). `Gweb.Adapters.Evaluation`'s
-branch coverage stays the lowest of any assembly for the same reason as Phase 7:
-`GeminiEvaluationProvider` now has even more independent failure-mode branches
-(everything from Phase 7 plus extraction-specific paths — missing fields, no-retry-on-failure)
-than the test suite exercises every pairwise combination of; each path *is* tested
-individually. Numbers re-measured and reported per-phase; a stale percentage from an
-earlier phase is never left standing in for what a later phase actually covers.
+Up across the board this phase (94.5%/84.4% vs. Phase 8's 93.7%/83.0%) — the new
+submission-gate code (`SubmissionChecker`, `SubmissionService`, the new repository
+methods) is thoroughly covered by design (every missing-item category, every
+document-status edge case, the full real-HTTP journey through `SubmitEndpointTests`).
+`Gweb.Adapters.Evaluation`'s branch coverage stays the lowest of any assembly, unchanged
+from Phase 8 since no code in it changed this phase: `GeminiEvaluationProvider` has
+more independent failure-mode branches than the test suite exercises every pairwise
+combination of; each path *is* tested individually. Numbers re-measured and reported
+per-phase; a stale percentage from an earlier phase is never left standing in for what a
+later phase actually covers.
