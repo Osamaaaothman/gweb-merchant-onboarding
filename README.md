@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 10 — deadline hardening & bounded retry.** This README grows with
+> **Status: Phase 11 — frontend.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -94,6 +94,14 @@ system's proposed one are persisted (`McClassification`), so a mismatch is visib
 a reviewer. See [`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-evaluation-provider.md)
 for the full design, including a real empirical finding (this model's latency runs
 close to the system's 35s internal target) and how the code defends against it.
+When the business description has no genuine keyword match in the catalog at all
+(found via live testing, Phase 11: `ClassificationService` used to silently substitute
+the catalog's browsing default and let a provider propose one of those arbitrary codes
+at full confidence), every candidate's confidence is capped at 35% and its explanation
+replaced with an honest "no confident match" message -- an unrelated business
+description never again gets shown as a 90%-confidence answer. The frontend also lets
+the applicant search the real catalog directly (`GET /v1/mcc?query=...`) and pick a
+code by hand instead of relying on either provider at all.
 
 Rate evaluation (`POST /v1/applications/{id}/evaluate`) extends the same provider with
 real **multimodal** statement extraction -- `GeminiEvaluationProvider` sends the actual
@@ -134,6 +142,18 @@ built-in retry, and is the one adapter that has hit a real transient failure in 
 project (a live HTTP 503 during Phase 8's manual testing). See
 [`docs/adr/0009-deadline-hardening-and-retry.md`](docs/adr/0009-deadline-hardening-and-retry.md).
 
+The frontend (Phase 11, `frontend/`) is a Vite + React + TypeScript SPA -- Tailwind v4 +
+hand-authored shadcn/ui-style components, TanStack Query for server state, Zustand for
+UI-only state, react-hook-form + zod mirroring the backend's own field validation,
+`motion` for restrained, deliberate animation. Talks to the real backend over the exact
+API surface documented below -- no separate "frontend API," no duplicated business
+logic. Building it surfaced and closed a real backend gap (a client-facing
+"list documents for an application" route never existed) and, for the first time in
+this project, exercised a genuinely real S3-compatible document upload end-to-end
+(MinIO, not just the in-memory adapter) -- see "Frontend" and the S3 section below, and
+[`docs/adr/0010-frontend-architecture.md`](docs/adr/0010-frontend-architecture.md) for
+the full design rationale.
+
 Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
 [`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md),
@@ -143,7 +163,8 @@ ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runt
 [`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-evaluation-provider.md),
 [`docs/adr/0007-rate-evaluation-and-risk-signals.md`](docs/adr/0007-rate-evaluation-and-risk-signals.md),
 [`docs/adr/0008-submission-gate.md`](docs/adr/0008-submission-gate.md),
-[`docs/adr/0009-deadline-hardening-and-retry.md`](docs/adr/0009-deadline-hardening-and-retry.md).
+[`docs/adr/0009-deadline-hardening-and-retry.md`](docs/adr/0009-deadline-hardening-and-retry.md),
+[`docs/adr/0010-frontend-architecture.md`](docs/adr/0010-frontend-architecture.md).
 
 ## Tech stack
 
@@ -156,7 +177,7 @@ ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runt
 | State | Amazon DynamoDB |
 | Documents | Amazon S3 (pre-signed uploads) |
 | AI evaluation | Mock adapter by default; real provider pluggable behind config |
-| Frontend | React + TypeScript + Vite **(TBD — Phase 11)** |
+| Frontend | React 19 + TypeScript + Vite, Tailwind v4 + shadcn/ui, TanStack Query, Zustand, react-hook-form + zod, motion (`frontend/`) — see `docs/adr/0010-frontend-architecture.md` |
 | Testing | xUnit, coverlet, Moq |
 | Persistence | Amazon.DynamoDBv2 SDK, single-table (`docs/adr/0003-dynamodb-table-strategy.md`) |
 
@@ -237,8 +258,8 @@ DYNAMODB_SERVICE_URL=http://localhost:8000 \
 AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local AWS_REGION=us-east-1 \
 dotnet run --project src/Gweb.Api
 
-curl -i -X POST http://localhost:5280/v1/applications
-curl -i http://localhost:5280/v1/applications/<id-from-the-response-above>
+curl -i -X POST http://localhost:5243/v1/applications
+curl -i http://localhost:5243/v1/applications/<id-from-the-response-above>
 ```
 
 `DYNAMODB_SERVICE_URL` is read only in `Program.cs`'s DynamoDB branch and is unset in
@@ -260,9 +281,43 @@ well-formed UUID → `404 NOT_FOUND`; `GET /v1/applications/not-a-guid` → `400
 VALIDATION_FAILED`. This closes the gap noted in earlier phases ("Phase 3's
 `Applicant`/`Business` repositories were not re-verified against a live DynamoDB
 Local") — they now have been, along with Phase 4's `Document` repository, which hadn't
-been live-verified even once before. What's still **not** verified live: an actual
-byte upload through the presigned URL to a real S3 bucket (no local S3-compatible
-service was set up for this) — see "Known gaps."
+been live-verified even once before.
+
+**Updated 2026-09-09 (Phase 11): a real S3-compatible upload has now actually
+happened.** `S3_SERVICE_URL` mirrors `DYNAMODB_SERVICE_URL` (same
+override-with-no-code-change mechanism) and points the real `AmazonS3Client` at a local
+MinIO container instead of AWS:
+
+```bash
+docker run -d --name minio -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio server /data --console-address ":9001"
+docker exec minio mc alias set local http://localhost:9000 minioadmin minioadmin
+docker exec minio mc mb local/gweb-documents-local
+
+PERSISTENCE_PROVIDER=dynamodb \
+APPLICATIONS_TABLE_NAME=gweb-applications-local \
+DYNAMODB_SERVICE_URL=http://localhost:8000 \
+DOCUMENTS_BUCKET_NAME=gweb-documents-local \
+S3_SERVICE_URL=http://localhost:9000 \
+AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin AWS_REGION=us-east-1 \
+dotnet run --project src/Gweb.Api
+```
+
+`POST .../documents/presign` → a real MinIO-signed presigned POST (same SigV4 shape
+S3 itself uses); POSTing an actual file to that URL with every `uploadFields` entry as
+a form field ahead of `file` → a genuine `204` from MinIO, the object actually stored;
+`POST .../complete` immediately afterward → `200`, `"status":"Received"`, real
+`actualSizeBytes`/checksum verification against the bytes MinIO actually has, not a
+declared value taken on faith. Exercised for all three required document types this
+way, then through the full frontend journey end-to-end (see "Frontend" below) — this
+closes what was, until this phase, the project's single longest-standing Known Gap
+("no real S3 bucket has ever received an actual uploaded byte"). One real limitation
+hit along the way: this MinIO version's bucket-CORS API rejected every configuration
+tried, so a real browser's cross-origin upload to `localhost:9000` needed a
+local-dev-only Vite proxy workaround — see `docs/adr/0010-frontend-architecture.md` and
+`frontend/vite.config.ts`'s comment. This does not apply to a real deployed frontend
+talking to real S3.
 
 **B) `sam local start-api`** — also re-verified for real this session, including a
 genuine cold `Building image...` pull of the `dotnet10` Lambda runtime image (several
@@ -272,6 +327,31 @@ just `WebApplicationFactory`. **Still open, not re-tested this session:** the ea
 finding that `--env-vars` (for forcing `PERSISTENCE_PROVIDER=inmemory` inside the
 container) is parsed by the SAM CLI but does not change which branch `Program.cs` takes
 at cold start. Option A above remains the verified path for the DynamoDB-backed flow.
+
+## Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev      # http://localhost:5173, proxies /v1 to http://localhost:5243
+```
+
+Run the backend separately first (`dotnet run --project src/Gweb.Api`, any of the
+options above — `PERSISTENCE_PROVIDER=inmemory` is enough for the full click-through
+journey except a real file landing in S3; see the MinIO section above for that).
+`frontend/vite.config.ts`'s dev-server `proxy` sends every `/v1/*` request to
+`http://localhost:5243`, so the frontend never needs CORS configured on the backend for
+local development, and every API call in the browser is a same-origin request.
+
+`npm run build` produces a static bundle in `frontend/dist/` — deployable to any static
+host (S3+CloudFront, in a real AWS deployment) once one exists; not deployed anywhere
+in this session (see Known Gaps). `VITE_API_BASE_URL` (unset by default, meaning
+"same origin") is the only environment-specific value a real deployment would set, to
+point the built bundle at the real API Gateway URL instead of a dev-server proxy.
+
+Full design rationale — framework choice, state-management split, the shadcn/ui CLI
+bugs worked around, the MinIO CORS workaround — in
+[`docs/adr/0010-frontend-architecture.md`](docs/adr/0010-frontend-architecture.md).
 
 ## Running tests
 
@@ -302,41 +382,41 @@ run them locally).
 
 ```bash
 # Start a new application
-curl -i -X POST http://localhost:5280/v1/applications
+curl -i -X POST http://localhost:5243/v1/applications
 # -> 201, Location: /v1/applications/<id>, body: {"id":"...","status":"InProgress","version":1,...}
 
 # Resume it later
-curl -i http://localhost:5280/v1/applications/<id>
+curl -i http://localhost:5243/v1/applications/<id>
 # -> 200, same shape
 
 # Unknown (but well-formed) id
-curl -i http://localhost:5280/v1/applications/00000000-0000-0000-0000-000000000000
+curl -i http://localhost:5243/v1/applications/00000000-0000-0000-0000-000000000000
 # -> 404, {"error":{"code":"NOT_FOUND",...}}
 
 # Malformed id -- rejected at the boundary, never reaches DynamoDB
-curl -i http://localhost:5280/v1/applications/not-a-guid
+curl -i http://localhost:5243/v1/applications/not-a-guid
 # -> 400, {"error":{"code":"VALIDATION_FAILED",...}}
 
 # Fill in applicant fields -- partial, PATCH semantics, call as many times as needed
-curl -i -X PATCH http://localhost:5280/v1/applications/<id>/applicant \
+curl -i -X PATCH http://localhost:5243/v1/applications/<id>/applicant \
   -H "Content-Type: application/json" \
   -d '{"legalFirstName":"Jane","legalLastName":"Testerson","email":"jane@example.invalid","governmentId":{"type":"Passport","number":"X1234567"}}'
 # -> 200, body has governmentId.last4 = "4567" -- the full number never appears anywhere
 
 # Fill in business fields, including beneficial owners
-curl -i -X PATCH http://localhost:5280/v1/applications/<id>/business \
+curl -i -X PATCH http://localhost:5243/v1/applications/<id>/business \
   -H "Content-Type: application/json" \
   -d '{"legalBusinessName":"Testerson Trading LLC","entityType":"Llc","beneficialOwners":[{"name":"John Doe","roleTitle":"Co-owner","ownershipPercentage":40}]}'
 # -> 200; combined ownership (this + the applicant's own OwnershipPercentage, if set)
 #    over 100% -> 400 VALIDATION_FAILED instead
 
 # Full aggregate view, including completeness -- what's still missing to submit
-curl http://localhost:5280/v1/applications/<id>
+curl http://localhost:5243/v1/applications/<id>
 # -> 200, { id, status, ..., applicant: {...}, business: {...},
 #           completeness: { isComplete, missingApplicantFields: [...], missingBusinessFields: [...] } }
 
 # Request a pre-signed upload for a document -- Lambda never sees the bytes
-curl -i -X POST http://localhost:5280/v1/applications/<id>/documents/presign \
+curl -i -X POST http://localhost:5243/v1/applications/<id>/documents/presign \
   -H "Content-Type: application/json" \
   -d '{"type":"BankEvidence","originalFilename":"voided-check.pdf","contentType":"application/pdf","declaredSizeBytes":48213,"declaredChecksumSha256Base64":"<base64-sha256-of-the-file>"}'
 # -> 201, { document: { id, status: "Uploading", ... }, uploadUrl, uploadFields: { key, Content-Type, x-amz-checksum-sha256, ... } }
@@ -345,27 +425,27 @@ curl -i -X POST http://localhost:5280/v1/applications/<id>/documents/presign \
 # this API.
 
 # After the client's direct-to-S3 upload finishes, confirm it landed and verify it
-curl -i -X POST http://localhost:5280/v1/applications/<id>/documents/<documentId>/complete
+curl -i -X POST http://localhost:5243/v1/applications/<id>/documents/<documentId>/complete
 # -> 200, { status: "Received", actualSizeBytes, uploadedAt, ... } on a verified match
 #    or   { status: "Rejected", rejectionReason: "..." } if checksum/size/signature disagree
 #    -- calling this again after either outcome is a no-op, safe to retry
 
 # Fetch a document's current lifecycle state
-curl http://localhost:5280/v1/applications/<id>/documents/<documentId>
+curl http://localhost:5243/v1/applications/<id>/documents/<documentId>
 # -> 200, { id, applicationId, type, status, originalFilename, contentType, ... }
 
 # Search the MCC catalog -- by code, code prefix, or description substring
-curl http://localhost:5280/v1/mcc?query=grocery
+curl http://localhost:5243/v1/mcc?query=grocery
 # -> 200, { query: "grocery", results: [ { code: "5411", description: "Grocery Stores, Supermarkets", category: "Retail" } ] }
 
-curl http://localhost:5280/v1/mcc?query=60
+curl http://localhost:5243/v1/mcc?query=60
 # -> 200, code-prefix matches (6010, 6011, 6012, ...) ranked ahead of description-only matches
 
-curl http://localhost:5280/v1/mcc
+curl http://localhost:5243/v1/mcc
 # -> 200, first 25 codes ordered by code -- a browsing default when no query is given
 
 # Classify a business's MCC -- requires the business description to be filled in first
-curl -i -X POST http://localhost:5280/v1/applications/<id>/classify
+curl -i -X POST http://localhost:5243/v1/applications/<id>/classify
 # -> 200, { candidates: [{ mccCode, confidence, explanation }, ...],
 #           proposedMccCode, proposedProvider: "mock" | "gemini", classifiedAt,
 #           selfSelectedMccCode: null, selfSelectedAt: null, hasMismatch: false, version }
@@ -374,18 +454,18 @@ curl -i -X POST http://localhost:5280/v1/applications/<id>/classify
 #   proposedMccCode: "5411", proposedProvider: "gemini", candidates[0].confidence: 0.98
 
 # Confirm the proposal, or correct it to a different real MCC code
-curl -i -X POST http://localhost:5280/v1/applications/<id>/classify/confirm \
+curl -i -X POST http://localhost:5243/v1/applications/<id>/classify/confirm \
   -H "Content-Type: application/json" -d '{"mccCode":"5411"}'
 # -> 200, same shape; selfSelectedMccCode now set; hasMismatch true if it disagrees
 #    with proposedMccCode
 # -> 400 VALIDATION_FAILED if mccCode isn't a real code in the catalog
 
 # Current classification state, without re-running classification
-curl http://localhost:5280/v1/applications/<id>/classify
+curl http://localhost:5243/v1/applications/<id>/classify
 # -> 200, same shape as above; 404 NOT_FOUND if classify has never been called
 
 # Evaluate without a processing statement -- still runs risk-signal detection
-curl -i -X POST http://localhost:5280/v1/applications/<id>/evaluate \
+curl -i -X POST http://localhost:5243/v1/applications/<id>/evaluate \
   -H "Content-Type: application/json" -d '{}'
 # -> 200, { status: "Completed", extracted: null, calculated: null, commentary: null,
 #           riskSignals: [{ code: "MISSING_PROCESSING_STATEMENT", message, sourceField: "processingStatementDocumentId" }, ...],
@@ -393,7 +473,7 @@ curl -i -X POST http://localhost:5280/v1/applications/<id>/evaluate \
 
 # Evaluate with a completed ProcessingStatement document (documentId from its own
 # presign/complete response -- see the document examples above)
-curl -i -X POST http://localhost:5280/v1/applications/<id>/evaluate \
+curl -i -X POST http://localhost:5243/v1/applications/<id>/evaluate \
   -H "Content-Type: application/json" -d '{"processingStatementDocumentId":"<documentId>"}'
 # -> 200, { status: "Completed",
 #           extracted: { processor, monthlyVolume, discountRatePercent, perTransactionFee, monthlyFee, chargebackFeeTotal, statementPeriod, provider },
@@ -406,11 +486,11 @@ curl -i -X POST http://localhost:5280/v1/applications/<id>/evaluate \
 # discountRatePercent: 2.65, matching the statement exactly
 
 # Current evaluation state, without re-running evaluation
-curl http://localhost:5280/v1/applications/<id>/evaluation
+curl http://localhost:5243/v1/applications/<id>/evaluation
 # -> 200, same shape as above; 404 NOT_FOUND if evaluate has never been called
 
 # Submit -- blocked while anything required is missing. 400, with the precise gap list
-curl -i -X POST http://localhost:5280/v1/applications/<id>/submit
+curl -i -X POST http://localhost:5243/v1/applications/<id>/submit
 # -> 400 VALIDATION_FAILED, { error: { details: {
 #      missingApplicantFields: ["legalFirstName", ...],
 #      missingBusinessFields: [...],
@@ -422,7 +502,7 @@ curl -i -X POST http://localhost:5280/v1/applications/<id>/submit
 # have to be genuinely complete before this returns 200.
 
 # Submit again once applicant, business, and all three required documents are complete
-curl -i -X POST http://localhost:5280/v1/applications/<id>/submit
+curl -i -X POST http://localhost:5243/v1/applications/<id>/submit
 # -> 200, the normalized review payload: { id, status: "Submitted",
 #      applicant: {...masked...}, business: {...masked...},
 #      documents: [ {...}, {...}, {...} ],
@@ -491,19 +571,19 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   to validate size but never states a ceiling. Generous enough for a scanned PDF or
   phone photo, bounded so a single upload stays well clear of Lambda's own memory/payload
   limits. Trivial to change; it is one named constant, read from nowhere else.
-- **No real S3 bucket has ever received an actual uploaded byte in this session.**
-  What *is* now verified live (2026-09-09, once Docker was available): `sam build`
-  (real `dotnet publish` including `Gweb.Adapters.Storage`), a real `sam local
-  start-api` run through the actual `dotnet10` Lambda runtime container,
-  `POST .../documents/presign` against live DynamoDB Local producing a genuinely
-  SigV4-signed presigned-POST policy (real local signing, no network call needed to
-  succeed), and `POST .../complete` against a non-existent bucket correctly returning
-  `503 DEPENDENCY_UNAVAILABLE` rather than silently succeeding. What remains
-  unverified: an actual multipart/form-data upload landing in a real (or local
-  S3-compatible) bucket and `complete()`'s checksum/signature verification succeeding
-  against it. `S3DocumentStorageTests` covers that logic against a mocked `IAmazonS3`
-  built from the real SDK's request/response types; worth an actual end-to-end upload
-  once an AWS account/profile (or a local S3-compatible service) is available.
+- **Resolved 2026-09-09 (Phase 11), previously the project's longest-standing gap: no
+  S3-compatible bucket had ever received an actual uploaded byte.** Now verified for
+  real against MinIO (local S3-compatible storage) — a genuine SigV4-signed presigned
+  POST, an actual multipart/form-data upload landing in the bucket, and `complete()`'s
+  checksum/size/file-signature verification succeeding against the real stored bytes —
+  exercised for all three required document types, both via raw `curl` and through the
+  full rendered frontend. See the "Frontend" section above for the exact setup. Still
+  genuinely unverified: the identical flow against **real AWS S3** rather than a
+  MinIO stand-in, and a real `sam local start-api`/deployed-Lambda run performing the
+  upload (this session's real-upload verification ran the backend via `dotnet run`,
+  not through the Lambda runtime emulator) — both need either a real AWS account or
+  more session time than remained after building the frontend that needed this
+  verified.
 - **IAM policies are unverified against real AWS.** `sam validate --lint` confirms the
   template is well-formed, but nothing in this repo actually exercises whether
   `ApiFunction`'s policy grants exactly the right actions end-to-end. This session
@@ -528,11 +608,23 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   jurisdiction/business-type, and this system has no rule engine to evaluate that --
   only the three unconditionally-required types (Government ID, Business Registration,
   Bank Evidence) block `POST /submit`. See ADR-0008.
-- **No aggregate "review screen" endpoint exists ahead of Phase 11's frontend.** The
-  granular endpoints (`GET /v1/applications/{id}`, `.../documents/{id}`,
-  `.../classify`, `.../evaluation`) already serve everything a review screen needs;
-  `POST /submit`'s own response *is* the normalized review payload the brief asks for.
-  See ADR-0008 for why no separate route was added for a UI that doesn't exist yet.
+- **No aggregate "review screen" endpoint exists** — `ReviewStep.tsx` calls the
+  granular endpoints (`GET /v1/applications/{id}`, `.../documents`, `.../classify`,
+  `.../evaluation`) directly and composes the review screen client-side, confirming the
+  ADR-0008 bet that these were sufficient without a new aggregate route was correct in
+  practice, not just in theory. `POST /submit`'s own response is still the one place
+  that returns everything pre-composed server-side (the normalized review payload).
+- **The frontend has no automated test suite of its own** (no Vitest/Playwright) —
+  verified this phase via real manual/scripted end-to-end testing (the actual rendered
+  UI driven through a real browser, plus raw `curl` reproducing exactly what the
+  browser's upload code sends), not repeatable automated coverage. The brief's testing
+  requirements are explicitly scoped to the backend (`docs/05-TESTING-RULES.md`); a
+  production frontend would still want its own component/integration tests.
+- **The frontend's beneficial-owners UI doesn't exist yet** — `Business.beneficialOwners`
+  is a real field the backend accepts and persists (see the next bullet), but
+  `BusinessStep.tsx` doesn't currently expose an add/edit UI for the array; only the
+  primary applicant's own fields are collected through the form. Documented as a gap
+  now that a real UI exists to have this gap in, not a silent omission.
 - **Beneficial owners beyond the primary applicant are lightweight records** (name,
   role, ownership percentage only) embedded in the `Business` payload, not full
   Applicant-grade KYC profiles with their own DOB/address/government ID. The brief

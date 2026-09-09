@@ -107,4 +107,17 @@ public sealed class DocumentService(IDocumentRepository repository, IDocumentSto
         Guid applicationId, Guid documentId, DeadlineBudget budget, CancellationToken cancellationToken = default) =>
         await repository.GetByIdAsync(applicationId, documentId, budget, cancellationToken).ConfigureAwait(false)
             ?? throw new NotFoundException($"Document {documentId} not found.");
+
+    /// <summary>
+    /// Thin wrapper around the repository query SubmissionService already uses
+    /// internally (see docs/adr/0008-submission-gate.md) -- exposed here too because a
+    /// resumed session has no other way to discover which documents were already
+    /// uploaded for this application (there was previously no client-facing "list
+    /// documents" route at all, only "fetch one by ID" -- a real gap for the brief's
+    /// "preserve state so a partially completed application can be resumed"
+    /// requirement, closed while building the Phase 11 frontend that needed it).
+    /// </summary>
+    public Task<IReadOnlyList<Document>> ListDocumentsAsync(
+        Guid applicationId, DeadlineBudget budget, CancellationToken cancellationToken = default) =>
+        repository.ListByApplicationIdAsync(applicationId, budget, cancellationToken);
 }

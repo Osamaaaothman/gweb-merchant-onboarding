@@ -220,6 +220,50 @@ public class DocumentEndpointTests(WebApplicationFactory<Program> factory) : ICl
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    [Fact]
+    public async Task ListDocumentsReturnsEmptyForANewApplication()
+    {
+        var client = factory.CreateClient();
+        var applicationId = await CreateApplicationAsync(client);
+
+        var response = await client.GetAsync($"/v1/applications/{applicationId}/documents");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(0, body.GetArrayLength());
+    }
+
+    [Fact]
+    public async Task ListDocumentsReturnsEveryDocumentUploadedForThatApplicationOnly()
+    {
+        var client = factory.CreateClient();
+        var applicationId = await CreateApplicationAsync(client);
+        var otherApplicationId = await CreateApplicationAsync(client);
+        await PresignAsync(client, applicationId, ValidPdfBytes.Length, Sha256Base64(ValidPdfBytes));
+        await PresignAsync(client, applicationId, ValidPdfBytes.Length, Sha256Base64(ValidPdfBytes));
+        await PresignAsync(client, otherApplicationId, ValidPdfBytes.Length, Sha256Base64(ValidPdfBytes));
+
+        var response = await client.GetAsync($"/v1/applications/{applicationId}/documents");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(2, body.GetArrayLength());
+        foreach (var document in body.EnumerateArray())
+        {
+            Assert.Equal(applicationId, document.GetProperty("applicationId").GetGuid());
+        }
+    }
+
+    [Fact]
+    public async Task ListDocumentsReturnsNotFoundForAnUnknownApplication()
+    {
+        var client = factory.CreateClient();
+
+        var response = await client.GetAsync($"/v1/applications/{Guid.NewGuid()}/documents");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     /// <summary>
     /// Stands in for a client actually uploading to the presigned URL -- reaches into
     /// the same singleton IDocumentStorage instance the running app resolved (the

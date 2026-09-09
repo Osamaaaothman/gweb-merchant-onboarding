@@ -17,6 +17,7 @@ internal static class DocumentEndpoints
         app.MapPost("/v1/applications/{id}/documents/presign", PresignDocumentAsync);
         app.MapPost("/v1/applications/{id}/documents/{documentId}/complete", CompleteDocumentAsync);
         app.MapGet("/v1/applications/{id}/documents/{documentId}", GetDocumentAsync);
+        app.MapGet("/v1/applications/{id}/documents", ListDocumentsAsync);
     }
 
     private static Task<IResult> PresignDocumentAsync(
@@ -88,6 +89,27 @@ internal static class DocumentEndpoints
             var document = await documentService.GetDocumentAsync(applicationId, docId, budget).ConfigureAwait(false);
 
             return Results.Ok(DocumentResponse.From(document));
+        });
+
+    private static Task<IResult> ListDocumentsAsync(
+        HttpContext httpContext,
+        string id,
+        ApplicationService applicationService,
+        DocumentService documentService,
+        IClock clock,
+        BaseConfig config,
+        StructuredLogger logger) =>
+        RequestExecution.RunAsync(httpContext, "list_documents", clock, config, logger, async budget =>
+        {
+            var applicationId = ParseId(id, "id");
+            // Same 404-on-the-parent convention as every other sub-resource endpoint
+            // here (presign, complete, patch applicant/business) -- an unknown
+            // application must not silently look like "zero documents so far."
+            await applicationService.GetApplicationAsync(applicationId, budget).ConfigureAwait(false);
+
+            var documents = await documentService.ListDocumentsAsync(applicationId, budget).ConfigureAwait(false);
+
+            return Results.Ok(documents.Select(DocumentResponse.From).ToList());
         });
 
     private static string ReadActor(HttpContext httpContext) =>

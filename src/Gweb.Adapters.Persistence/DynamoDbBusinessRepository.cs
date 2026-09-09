@@ -10,7 +10,19 @@ namespace Gweb.Adapters.Persistence;
 /// DynamoDbApplicantRepository for the optimistic-concurrency convention this mirrors.</summary>
 public sealed class DynamoDbBusinessRepository(IAmazonDynamoDB client, string tableName) : IBusinessRepository
 {
-    private const string EntityType = "BUSINESS";
+    // Named RecordTypeMarker, not EntityType, deliberately -- Business is the one
+    // domain entity in this codebase whose own field is *also* called EntityType
+    // (Gweb.Domain.Applications.EntityType). A same-named local const here shadowed
+    // that type in FromItem's `item.GetOptionalEnum<EntityType>("entityType")` call,
+    // which silently resolved to this string constant instead of the enum -- causing
+    // a real ArgumentException ("Requested value 'BUSINESS' was not found") on any
+    // GET where the business's real EntityType had never been set yet, since the
+    // "entityType" attribute was left holding this literal marker string instead of
+    // being overwritten by a real enum value. Same root cause as the sibling-namespace
+    // shadowing gotcha documented in AI-USAGE.md Sec.5 (Phase 8) -- a same-named
+    // identifier loses to whatever else is in scope; the fix here is the same one:
+    // give it a name that cannot collide.
+    private const string RecordTypeMarker = "BUSINESS";
     private const string SortKey = "BUSINESS";
 
     public async Task<Business?> GetByApplicationIdAsync(Guid applicationId, DeadlineBudget budget, CancellationToken cancellationToken = default)
@@ -58,7 +70,15 @@ public sealed class DynamoDbBusinessRepository(IAmazonDynamoDB client, string ta
     private static Dictionary<string, AttributeValue> ToItem(Business business)
     {
         var item = Key(business.ApplicationId);
-        item["entityType"] = new AttributeValue { S = EntityType };
+        // Deliberately NOT the "entityType" attribute key every sibling repository
+        // uses for this same write-only record-type marker -- Business is the one
+        // domain entity that also has a real field called EntityType, stored under
+        // that exact attribute key two lines below. Sharing the key would mean an
+        // unset Business.EntityType leaves "entityType" holding this literal marker
+        // string instead of being absent, which is exactly what caused the real bug
+        // this const's renaming above documents. "recordType" cannot collide with any
+        // current or future Business field the way "entityType" already did once.
+        item["recordType"] = new AttributeValue { S = RecordTypeMarker };
         item["version"] = new AttributeValue { N = business.Version.ToString() };
         item["createdAt"] = new AttributeValue { S = business.CreatedAt.ToString("O") };
         item["updatedAt"] = new AttributeValue { S = business.UpdatedAt.ToString("O") };
