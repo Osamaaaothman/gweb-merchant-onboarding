@@ -17,6 +17,7 @@ public class LoadBaseConfigTests
         Assert.Equal(AiProvider.Mock, config.AiProvider);
         Assert.Equal(LogLevel.Info, config.LogLevel);
         Assert.Null(config.AiApiKey);
+        Assert.Equal("gemini-3.6-flash", config.GeminiModel);
     }
 
     [Fact]
@@ -27,8 +28,9 @@ public class LoadBaseConfigTests
             ["AWS_REGION"] = "eu-west-1",
             ["DEADLINE_TARGET_MS"] = "20000",
             ["PRESIGN_TTL_SECONDS"] = "120",
-            ["AI_PROVIDER"] = "Anthropic",
+            ["AI_PROVIDER"] = "Gemini",
             ["AI_API_KEY"] = "test-key-not-a-real-secret",
+            ["GEMINI_MODEL"] = "gemini-test-model",
             ["LOG_LEVEL"] = "Debug",
         };
 
@@ -37,8 +39,9 @@ public class LoadBaseConfigTests
         Assert.Equal("eu-west-1", config.AwsRegion);
         Assert.Equal(20_000, config.DeadlineTargetMs);
         Assert.Equal(120, config.PresignTtlSeconds);
-        Assert.Equal(AiProvider.Anthropic, config.AiProvider);
+        Assert.Equal(AiProvider.Gemini, config.AiProvider);
         Assert.Equal("test-key-not-a-real-secret", config.AiApiKey);
+        Assert.Equal("gemini-test-model", config.GeminiModel);
         Assert.Equal(LogLevel.Debug, config.LogLevel);
     }
 

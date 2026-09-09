@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Gweb.Adapters.Evaluation/Gweb.Adapters.Evaluation.csproj" />
     <Project Path="src/Gweb.Adapters.Mcc/Gweb.Adapters.Mcc.csproj" />
     <Project Path="src/Gweb.Adapters.Persistence/Gweb.Adapters.Persistence.csproj" />
     <Project Path="src/Gweb.Adapters.RiskPolicy/Gweb.Adapters.RiskPolicy.csproj" />

@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 6 — risk policy engine.** This README grows with
+> **Status: Phase 7 — AI adapter & MCC classification.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -81,12 +81,27 @@ No endpoint yet — it's consumed internally once Phase 7 (classify) and Phase 8
 structurally by `NoAutoApprovalPathTests`, which fails immediately if any domain enum
 ever grows an "Approved" value, not just documented as a promise.
 
+MCC classification (`POST /v1/applications/{id}/classify`) goes through `IEvaluationProvider`
+-- `MockEvaluationProvider` by default (deterministic, offline, reuses real catalog
+hints) or `GeminiEvaluationProvider` when `AI_PROVIDER=gemini` and a real key is
+configured. Both are grounded against `IMccCatalog` (never free-form) and every
+candidate is re-validated against the real catalog before being persisted -- a
+hallucinated code is dropped even if the model ignores its instructions.
+`ClassificationService` falls back to the mock provider (clearly labelled
+`"provider": "mock"`) if the real provider fails for any reason, so a caller always
+gets a usable, honest result. Both the applicant's confirmed/corrected MCC and the
+system's proposed one are persisted (`McClassification`), so a mismatch is visible to
+a reviewer. See [`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-evaluation-provider.md)
+for the full design, including a real empirical finding (this model's latency runs
+close to the system's 35s internal target) and how the code defends against it.
+
 Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
 [`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md),
 [`docs/adr/0003-dynamodb-table-strategy.md`](docs/adr/0003-dynamodb-table-strategy.md),
 [`docs/adr/0004-mcc-catalog-storage.md`](docs/adr/0004-mcc-catalog-storage.md),
-[`docs/adr/0005-risk-policy-representation.md`](docs/adr/0005-risk-policy-representation.md).
+[`docs/adr/0005-risk-policy-representation.md`](docs/adr/0005-risk-policy-representation.md),
+[`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-evaluation-provider.md).
 
 ## Tech stack
 
@@ -306,6 +321,26 @@ curl http://localhost:5280/v1/mcc?query=60
 
 curl http://localhost:5280/v1/mcc
 # -> 200, first 25 codes ordered by code -- a browsing default when no query is given
+
+# Classify a business's MCC -- requires the business description to be filled in first
+curl -i -X POST http://localhost:5280/v1/applications/<id>/classify
+# -> 200, { candidates: [{ mccCode, confidence, explanation }, ...],
+#           proposedMccCode, proposedProvider: "mock" | "gemini", classifiedAt,
+#           selfSelectedMccCode: null, selfSelectedAt: null, hasMismatch: false, version }
+# Real example against a live Gemini call (AI_PROVIDER=gemini), verified during this
+# phase's build for a grocery-store description:
+#   proposedMccCode: "5411", proposedProvider: "gemini", candidates[0].confidence: 0.98
+
+# Confirm the proposal, or correct it to a different real MCC code
+curl -i -X POST http://localhost:5280/v1/applications/<id>/classify/confirm \
+  -H "Content-Type: application/json" -d '{"mccCode":"5411"}'
+# -> 200, same shape; selfSelectedMccCode now set; hasMismatch true if it disagrees
+#    with proposedMccCode
+# -> 400 VALIDATION_FAILED if mccCode isn't a real code in the catalog
+
+# Current classification state, without re-running classification
+curl http://localhost:5280/v1/applications/<id>/classify
+# -> 200, same shape as above; 404 NOT_FOUND if classify has never been called
 ```
 
 ## Seeding / refreshing the MCC catalog
@@ -430,38 +465,73 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   audit log of who changed what and when" is not. See ADR-0005's Consequences section
   for what a production version of this would need (a config service, not a packaged
   JSON file) — a deliberate scope decision at this assessment's size, not an oversight.
+- **AI evaluation provider is Gemini, not Anthropic/OpenAI/Bedrock (the brief's named
+  examples).** No vendor is mandated — "an adapter with a mock implementation" is the
+  actual requirement — and this was a real key Osama supplied mid-session, used per his
+  explicit instruction ("use only the free models"). See ADR-0006.
+- **Free-tier Gemini rate limits/overload are real** — hit once during manual
+  verification (a genuine HTTP 503 from the live API). The system's fallback-to-mock
+  design means this degrades classification *quality* for that one request, not
+  request *success* — the caller still gets a labelled, usable result.
+- **This model's real-world latency runs close to the system's 35s internal deadline
+  target** — a single classify call took as long as ~30 seconds during manual testing
+  (this model spends a large share of its output budget on hidden "thinking" tokens).
+  Defended against with a hardcoded 20-second cap on that one call
+  (`GeminiCallExecutor`) independent of remaining request budget, so a slow model
+  response can never consume the whole request — verified by a real test using a
+  hanging HTTP handler, not just asserted. If a faster model becomes available later,
+  this cap is a deliberate, revisitable ceiling, not a permanent architectural limit.
+- **`AI_API_KEY` in `infra/template.yaml` is a `NoEcho` CloudFormation parameter, not
+  an SSM SecureString reference** — simpler for a project that has never executed a
+  real `sam deploy`. A production setup should source it from SSM Parameter Store
+  instead (the shape is already documented in `docs/06-COLLABORATION-PROTOCOL.md`), so
+  the key never passes through a CloudFormation parameter, `NoEcho` or not.
 
 ## What is real vs. mocked
 
 - **Mocked by default:** the AI evaluation/classification provider (labelled
-  `"provider": "mock"` in every response it touches).
-- **Real:** everything else — validation, persistence, document storage/lifecycle,
-  MCC catalog, risk policy, deadline/timeout handling.
+  `"provider": "mock"` in every response it touches) -- `AI_PROVIDER=mock` needs no
+  credentials, per brief "must work through an adapter with a mock implementation when
+  no credentials exist."
+- **Real when configured:** `AI_PROVIDER=gemini` calls the real Gemini API for real.
+  Verified against the live API multiple times during Phase 7's build, including one
+  full real request through the entire stack that correctly classified a grocery-store
+  description as MCC 5411 (confidence 0.98) -- see
+  [`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-evaluation-provider.md)
+  "What's verified." If the real provider fails, the system falls back to the mock
+  provider automatically and labels the response accordingly, rather than surfacing an
+  error for what should be a graceful degradation.
+- **Real, unconditionally:** everything else — validation, persistence, document
+  storage/lifecycle, MCC catalog, risk policy, deadline/timeout handling.
 
 ## Test coverage
 
 Measured by running `dotnet test --collect:"XPlat Code Coverage" --settings
-coverlet.runsettings` (last run: 248 tests, all passing; generated-code excluded per
+coverlet.runsettings` (last run: 294 tests, all passing; generated-code excluded per
 `coverlet.runsettings`):
 
 | Assembly | Line coverage | Branch coverage |
 |---|---|---|
-| `Gweb.Services` | 100% | 100% |
 | `Gweb.Config` | 100% | 100% |
 | `Gweb.Adapters.Storage` | 100% | 100% |
 | `Gweb.Adapters.Mcc` | 100% | 88.9% |
 | `Gweb.Adapters.RiskPolicy` | 100% | 83.3% |
 | `Gweb.Shared` | 99.3% | 95.7% |
-| `Gweb.Adapters.Persistence` | 97.8% | 78.8% |
-| `Gweb.Domain` | 89.8% | 86.7% |
-| `Gweb.Api` | 88.5% | 66.7% |
-| **Overall** | **92.8%** | **84.7%** |
+| `Gweb.Services` | 95.7% | 85.7% |
+| `Gweb.Adapters.Persistence` | 98.2% | 78.4% |
+| `Gweb.Domain` | 90.4% | 87.0% |
+| `Gweb.Api` | 87.9% | 67.2% |
+| `Gweb.Adapters.Evaluation` | 86.7% | 54.2% |
+| **Overall** | **92.6%** | **82.2%** |
 
-Essentially flat vs. Phase 5 (92.6%/84.7%) — same pattern as before: the new
-`Gweb.Adapters.RiskPolicy` assembly carries near-full line coverage; its uncovered
-branches are the same shape as `Gweb.Adapters.Mcc`'s (provider/MCC combinations not
-exercised by name in tests, e.g. every possible provider-has-overrides-but-not-for-this-MCC
-permutation) — real logic, not every theoretical branch combination independently
-tested. Numbers re-measured and reported per-phase; a stale percentage from an earlier
-phase is never
+The two real movers this phase: `Gweb.Adapters.Evaluation` (new) sits lower than every
+other adapter — `GeminiEvaluationProvider` has more independent failure-mode branches
+(size limit, non-success status, timeout, malformed JSON, MAX_TOKENS, safety-filter
+empty content, markdown-fence stripping) than the 10 tests covering it exercise every
+combination of; each path *is* tested, just not every pairwise combination.
+`Gweb.Services` moved off 100% for the first time since Phase 2 — `ClassificationService`'s
+`ReferenceEquals(primaryProvider, fallbackProvider)` fast-path (the `AI_PROVIDER=mock`
+case) isn't independently unit-tested at the service layer, only exercised indirectly
+through the HTTP endpoint tests, which all run under forced `AI_PROVIDER=mock`. Numbers
+re-measured and reported per-phase; a stale percentage from an earlier phase is never
 left standing in for what a later phase actually covers.

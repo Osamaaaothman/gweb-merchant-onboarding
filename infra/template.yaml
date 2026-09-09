@@ -29,8 +29,29 @@ Parameters:
   AiProvider:
     Type: String
     Default: Mock
-    AllowedValues: [Mock, Anthropic]
+    AllowedValues: [Mock, Gemini]
     Description: Evaluation adapter to wire up. Defaults to Mock — no credentials required.
+
+  GeminiModel:
+    Type: String
+    Default: gemini-3.6-flash
+    Description: >
+      Only read when AiProvider=Gemini. An env var, not a hardcoded value, because
+      Google's free-tier model lineup has already changed once during this project's
+      build (see docs/adr/0006-ai-evaluation-provider.md) and will again.
+
+  AiApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >
+      Only required when AiProvider=Gemini. NoEcho keeps it out of the CloudFormation
+      console/CLI output and change-set diffs, but this is a simplification for a
+      project that has not executed a real deployment (see README "Known gaps") --
+      a production setup should source this from SSM Parameter Store SecureString
+      instead (docs/06-COLLABORATION-PROTOCOL.md already shows the
+      `aws ssm put-parameter` shape for exactly this), so the value never passes
+      through a CloudFormation parameter at all, real or NoEcho'd.
 
 Globals:
   Function:
@@ -47,6 +68,8 @@ Globals:
         DEADLINE_TARGET_MS: !Ref DeadlineTargetMs
         PRESIGN_TTL_SECONDS: !Ref PresignTtlSeconds
         AI_PROVIDER: !Ref AiProvider
+        GEMINI_MODEL: !Ref GeminiModel
+        AI_API_KEY: !Ref AiApiKey
         LOG_LEVEL: Info
 
 Resources:
