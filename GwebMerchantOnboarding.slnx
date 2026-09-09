@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Gweb.Adapters.Mcc/Gweb.Adapters.Mcc.csproj" />
     <Project Path="src/Gweb.Adapters.Persistence/Gweb.Adapters.Persistence.csproj" />
+    <Project Path="src/Gweb.Adapters.RiskPolicy/Gweb.Adapters.RiskPolicy.csproj" />
     <Project Path="src/Gweb.Adapters.Storage/Gweb.Adapters.Storage.csproj" />
     <Project Path="src/Gweb.Api/Gweb.Api.csproj" />
     <Project Path="src/Gweb.Config/Gweb.Config.csproj" />

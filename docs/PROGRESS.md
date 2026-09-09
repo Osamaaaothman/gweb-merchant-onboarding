@@ -448,3 +448,40 @@ one. Updated README's Known Gaps to reflect exactly this, replacing the older, n
 Cleaned up afterward: stopped the `dotnet run` process, stopped and removed the
 `dynamodb-local` container, left `sam local start-api` process to exit on its own.
 Nothing left running that outlives this session.
+
+---
+
+## 2026-09-09 (same day, continued) — Phase 6 (risk policy engine) built and merged
+
+Osama asked a clarifying question before continuing: whether closing the S3-live-upload
+and IAM-live-verification gaps was actually required by the brief, or optional. Checked
+`docs/00-PRODUCT-BRIEF.md` directly rather than guessing -- line 208 says "Runnable
+demo — **deployed endpoint OR reproducible local Lambda/API simulation** + deploy
+instructions" and the acceptance checklist asks for "deployment **instructions**," not
+an executed deployment. Confirmed and told him: neither gap blocks anything: an AWS
+account is optional, only needed if he personally wants a live deploy demo later.
+
+Then: *"طيب يلا نكمل روح ع الي بعده وكمل"* -- proceeded into Phase 6.
+
+**What got built:**
+- `IRiskPolicy`/`RiskLevel` (`Gweb.Domain.RiskPolicy`) -- deliberately no reference to
+  `IMccCatalog`/`MccCode` anywhere, the structural enforcement of the brief's "MCC
+  taxonomy and risk policy are two separate things."
+- `StaticRiskPolicy` (`Gweb.Adapters.RiskPolicy`) -- packaged JSON, same mechanism as
+  the MCC catalog but a different justification (hand-authored business policy, not an
+  external dataset -- no import-tool pipeline built for it, documented why not in
+  ADR-0005).
+- Real provider overrides proving the Phase 6 gate directly: MCC 6012 evaluates to
+  `EnhancedReview` (no provider), `Restricted` (`acquirer-conservative`), `Standard`
+  (`acquirer-permissive`) -- three outcomes, one MCC, from configuration alone.
+- `NoAutoApprovalPathTests` (`tests/Gweb.Tests/Architecture/`) -- a real, run test
+  that fails immediately if `ApplicationStatus` or `RiskLevel` ever grows an
+  "Approved"/"Rejected" value. Turns "never auto-approve" from a promise in the brief
+  into something a CI run actually checks.
+- No new endpoint -- the brief's API surface has none for risk policy; registered in
+  DI, ready for Phase 7/8 to consume.
+
+**Verified for real:** `dotnet build` (0 warnings/errors), `dotnet test` -- 248/248
+passing (up from 238). Coverage 92.8%/84.7% (flat vs. Phase 5's 92.6%/84.7%).
+
+Merged to `main` with `--no-ff`, pushed.

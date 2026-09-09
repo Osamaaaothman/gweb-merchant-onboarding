@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 5 — MCC catalog.** This README grows with
+> **Status: Phase 6 — risk policy engine.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -70,11 +70,23 @@ document this session has no access to — the catalog was compiled from the
 well-established public MCC taxonomy instead, flagged as a deliberate substitution,
 not a silent one).
 
+Risk policy (`IRiskPolicy` / `StaticRiskPolicy`) is structurally independent of the MCC
+catalog — it takes a bare MCC code string, never an `MccCode`, so the two can change
+without touching each other (brief's core rule for this area). Risk level
+(`Standard`/`EnhancedReview`/`Restricted`) is computed from packaged, hand-authored
+configuration data with per-acquirer overrides, never hardcoded per MCC in C#. See
+[`docs/adr/0005-risk-policy-representation.md`](docs/adr/0005-risk-policy-representation.md).
+No endpoint yet — it's consumed internally once Phase 7 (classify) and Phase 8
+(evaluate) exist. **No auto-approval path exists anywhere in this codebase** — enforced
+structurally by `NoAutoApprovalPathTests`, which fails immediately if any domain enum
+ever grows an "Approved" value, not just documented as a promise.
+
 Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
 [`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md),
 [`docs/adr/0003-dynamodb-table-strategy.md`](docs/adr/0003-dynamodb-table-strategy.md),
-[`docs/adr/0004-mcc-catalog-storage.md`](docs/adr/0004-mcc-catalog-storage.md).
+[`docs/adr/0004-mcc-catalog-storage.md`](docs/adr/0004-mcc-catalog-storage.md),
+[`docs/adr/0005-risk-policy-representation.md`](docs/adr/0005-risk-policy-representation.md).
 
 ## Tech stack
 
@@ -412,6 +424,12 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   test-verified by code; the remaining ~270 entries have not been cross-checked
   word-for-word against an authoritative paid source. See ADR-0004 for the full
   reasoning and what a real refresh against the licensed manual would look like.
+- **Risk policy is redeploy-to-change, not hot-reloadable, and has no version/audit
+  trail of its own.** "Changeable without touching the catalog" (the brief's literal
+  requirement) is satisfied; "changeable without a deploy, with a compliance-grade
+  audit log of who changed what and when" is not. See ADR-0005's Consequences section
+  for what a production version of this would need (a config service, not a packaged
+  JSON file) — a deliberate scope decision at this assessment's size, not an oversight.
 
 ## What is real vs. mocked
 
@@ -423,7 +441,7 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 ## Test coverage
 
 Measured by running `dotnet test --collect:"XPlat Code Coverage" --settings
-coverlet.runsettings` (last run: 238 tests, all passing; generated-code excluded per
+coverlet.runsettings` (last run: 248 tests, all passing; generated-code excluded per
 `coverlet.runsettings`):
 
 | Assembly | Line coverage | Branch coverage |
@@ -432,17 +450,18 @@ coverlet.runsettings` (last run: 238 tests, all passing; generated-code excluded
 | `Gweb.Config` | 100% | 100% |
 | `Gweb.Adapters.Storage` | 100% | 100% |
 | `Gweb.Adapters.Mcc` | 100% | 88.9% |
+| `Gweb.Adapters.RiskPolicy` | 100% | 83.3% |
 | `Gweb.Shared` | 99.3% | 95.7% |
 | `Gweb.Adapters.Persistence` | 97.8% | 78.8% |
 | `Gweb.Domain` | 89.8% | 86.7% |
 | `Gweb.Api` | 88.5% | 66.7% |
-| **Overall** | **92.6%** | **84.7%** |
+| **Overall** | **92.8%** | **84.7%** |
 
-Essentially flat vs. Phase 4 (92.4%/84.4%) — the new `Gweb.Adapters.Mcc` assembly
-carries its own coverage close to full; the small overall move is normal variance, not
-a quality shift. `Gweb.Adapters.Mcc`'s uncovered branches are ranking-tie edge cases in
-`StaticMccCatalog.Search` (e.g. a query matching zero of the three ranking groups
-simultaneously) that don't occur for any query used across the 276-row real dataset in
-tests — real logic, just not every theoretical branch combination exercised. Numbers
-re-measured and reported per-phase; a stale percentage from an earlier phase is never
+Essentially flat vs. Phase 5 (92.6%/84.7%) — same pattern as before: the new
+`Gweb.Adapters.RiskPolicy` assembly carries near-full line coverage; its uncovered
+branches are the same shape as `Gweb.Adapters.Mcc`'s (provider/MCC combinations not
+exercised by name in tests, e.g. every possible provider-has-overrides-but-not-for-this-MCC
+permutation) — real logic, not every theoretical branch combination independently
+tested. Numbers re-measured and reported per-phase; a stale percentage from an earlier
+phase is never
 left standing in for what a later phase actually covers.

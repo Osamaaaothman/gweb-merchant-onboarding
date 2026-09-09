@@ -1,0 +1,28 @@
+{
+  "defaultLevel": "Standard",
+  "baseRules": [
+    { "mccCode": "6011", "level": "EnhancedReview", "reason": "Automated cash disbursement -- quasi-cash." },
+    { "mccCode": "6012", "level": "EnhancedReview", "reason": "Financial institution merchandise/services/debt repayment -- named in Mastercard guidance for specialized purchase types." },
+    { "mccCode": "6051", "level": "EnhancedReview", "reason": "Foreign currency, money orders, travelers cheques -- quasi-cash, named in Mastercard guidance." },
+    { "mccCode": "6211", "level": "EnhancedReview", "reason": "Securities brokers/dealers -- security-related activity, named in Mastercard guidance." },
+    { "mccCode": "6540", "level": "EnhancedReview", "reason": "Prepaid/stored value funding -- quasi-cash." },
+    { "mccCode": "5966", "level": "EnhancedReview", "reason": "Outbound telemarketing -- elevated chargeback/fraud category." },
+    { "mccCode": "5967", "level": "EnhancedReview", "reason": "Inbound telemarketing -- elevated chargeback/fraud category." },
+    { "mccCode": "7273", "level": "EnhancedReview", "reason": "Dating/escort services -- elevated reputational and compliance risk." },
+    { "mccCode": "7297", "level": "Restricted", "reason": "Massage parlors -- category historically associated with human-trafficking risk indicators; restricted pending enhanced KYB." },
+    { "mccCode": "7995", "level": "Restricted", "reason": "Betting/casino gaming/wagers -- gambling, restricted or unsupported in most acquiring programs." }
+  ],
+  "providerOverrides": {
+    "acquirer-conservative": [
+      { "mccCode": "6012", "level": "Restricted", "reason": "This acquirer's program does not support financial-institution merchandise/services activity at all." },
+      { "mccCode": "6051", "level": "Restricted", "reason": "This acquirer's program treats all quasi-cash/money-order activity as unsupported." },
+      { "mccCode": "5966", "level": "Restricted", "reason": "This acquirer does not underwrite outbound telemarketing." },
+      { "mccCode": "5967", "level": "Restricted", "reason": "This acquirer does not underwrite inbound telemarketing." }
+    ],
+    "acquirer-permissive": [
+      { "mccCode": "6012", "level": "Standard", "reason": "This acquirer underwrites financial-institution merchandise/services activity as standard risk, subject to its own enhanced diligence outside this system." },
+      { "mccCode": "6051", "level": "Standard", "reason": "This acquirer underwrites quasi-cash activity as standard risk under its program terms." },
+      { "mccCode": "6211", "level": "Standard", "reason": "This acquirer underwrites securities brokers/dealers as standard risk under its program terms." }
+    ]
+  }
+}
