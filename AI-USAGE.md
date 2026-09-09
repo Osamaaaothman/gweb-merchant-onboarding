@@ -41,6 +41,10 @@ Be specific per area, not generic.
 | Persistence bugs (in-memory repositories) | Found and fixed two more real bugs this phase by running tests, both variations on "the caller mutated a live reference the repository was also holding" -- full detail in §5 | *(Osama: fill in)* |
 | PATCH endpoints + enum serialization | Found a real bug via HTTP-level tests: `System.Text.Json`'s default enum handling expects numbers, not strings ("Llc"/"Passport"), fixed with `JsonStringEnumConverter` | *(Osama: fill in)* |
 | Documentation (README, ADRs, this file's factual tables) | Generated | *(Osama: fill in)* |
+| Document domain entity + state machine (Phase 4) | Generated `Document`/`DocumentStatus`/`DocumentType`, `FileSignatureValidator` (magic-byte check), `DocumentKeyGenerator` (non-guessable S3 key, extension server-derived), `FilenameSanitizer`, `AllowedContentTypes`, `DocumentUploadLimits` | *(Osama: fill in)* |
+| S3 presigned-upload adapter (Phase 4) | Generated `S3DocumentStorage` using presigned **POST** (not PUT) specifically because only POST can enforce a content-length-range condition -- verified against the installed `AWSSDK.S3` package's own XML docs before writing the code, not assumed. Pins Content-Type/size/checksum as S3 policy conditions; `complete()` re-verifies via `ChecksumMode.ENABLED` plus a 16-byte ranged read | *(Osama: fill in)* |
+| `DocumentService` (presign + complete orchestration) | Generated; complete() is idempotent (a repeat call after the document leaves `Uploading` just returns the current record without re-verifying) and treats a checksum/size/signature mismatch as a normal `Rejected` outcome, not an exception | *(Osama: fill in)* |
+| Document endpoints + IAM (Phase 4) | `POST .../documents/presign`, `POST .../documents/{id}/complete`, `GET .../documents/{id}`; `ApiFunction`'s policy extended with `s3:PutObject`/`s3:GetObject`/`s3:GetObjectAttributes` scoped to the one documents bucket ARN -- see §5 for why `PutObject` is required even though the Lambda never uploads a byte itself | *(Osama: fill in)* |
 
 *(Osama: the "My involvement" column is intentionally blank — Claude should not write
 this in your voice. Fill it in with what you actually reviewed, questioned, or would
@@ -200,6 +204,45 @@ written, which is exactly the kind of gap that erodes trust in documentation.)*
 **Fix:** `builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()))`
 in `Program.cs`, applied globally so it covers both request deserialization and
 response serialization consistently.
+
+---
+
+**Issue:** The first cut of `ApiFunction`'s IAM policy for S3 granted only
+`s3:GetObject`/`s3:GetObjectAttributes` on the documents bucket, reasoning (in a code
+comment) that "the presigned POST itself needs no Lambda-side IAM grant -- the
+signature is what authorizes the client's upload." That reasoning is wrong: a
+presigned request is signed with the *signer's own* IAM credentials, so S3 authorizes
+the eventual upload against the Lambda role's permissions, not against some
+signature-derived allowance. Without `s3:PutObject` on the role, every client upload
+using a validly-signed presigned POST would still get a `403` from S3.
+**Why it mattered:** This would have been a working `sam validate`/`sam build`, a
+working presign response, and a `403` only at actual upload time -- exactly the kind
+of gap that looks fine in every test that doesn't hit real S3, and was caught only by
+re-reasoning about how SigV4 presigning actually authorizes a request, not by any test
+in this repo (none exercise the real IAM policy).
+**What I did:** *(Osama: fill in -- this is a good example of "compiles and the tests
+pass" not being sufficient to trust; do you want a note added to the Known Gaps
+section flagging that IAM policies specifically are unverified against real AWS?)*
+**Fix:** Added `s3:PutObject` to the policy statement in `infra/template.yaml`,
+corrected the comment to explain why it's required.
+
+---
+
+**Issue:** A test for `S3DocumentStorage` guessed `CreatePresignedPostResponse`'s
+constructor as `new CreatePresignedPostResponse(url, fields)` (2 positional args).
+`dotnet build` failed immediately: the real type has a parameterless constructor with
+`Url` (a `string`, not a `Uri`) and `Fields` as settable properties. A second test
+compared a `byte[]` prefix using `Assert.StartsWith`, which only has string overloads
+in xUnit and doesn't work on byte arrays at all.
+**Why it mattered:** Both were caught at compile time, not runtime -- cheap mistakes,
+but exactly why this project's rule is "verify against the installed package's XML
+docs before writing the call," which is what resolved both: checked
+`CreatePresignedPostResponse`'s real member list in `AWSSDK.S3.xml` rather than
+guessing a second time.
+**What I did:** *(Osama: fill in)*
+**Fix:** Object-initializer syntax with the real property names/types; replaced
+`Assert.StartsWith` with `Assert.Equal(expected, actual[..4])` for the byte-array
+comparison.
 
 ---
 
