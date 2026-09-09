@@ -146,4 +146,31 @@ public class S3DocumentStorageTests
         // unconfigured call before ever reaching the assertion below.
         await Assert.ThrowsAsync<ValidationException>(() => storage.DownloadObjectAsync("applications/x/documents/y/z.pdf", Budget()));
     }
+
+    [Fact]
+    public async Task GetUploadedObjectThrowsDependencyTimeoutExceptionWhenTheCallHangsPastItsBudget()
+    {
+        // Phase 10: closes the one adapter that had no hanging-dependency test yet
+        // (DynamoDB and Gemini already had one each). Metadata resolves immediately;
+        // the object-body GetObjectAsync call is the one that hangs, since that's the
+        // call actually routed through S3CallExecutor's budget-derived timeout.
+        var hangingCall = new TaskCompletionSource<GetObjectResponse>();
+        var mockClient = new Mock<IAmazonS3>();
+        mockClient
+            .Setup(c => c.GetObjectMetadataAsync(It.IsAny<GetObjectMetadataRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectMetadataResponse { ContentLength = 1024, ChecksumSHA256 = "ZGVjbGFyZWQ=" });
+        mockClient
+            .Setup(c => c.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .Returns((GetObjectRequest _, CancellationToken ct) =>
+            {
+                ct.Register(() => hangingCall.TrySetCanceled(ct));
+                return hangingCall.Task;
+            });
+        var storage = new S3DocumentStorage(mockClient.Object, BucketName);
+        // remaining 550ms - S3CallExecutor's 500ms reserve = a 50ms real-time timeout,
+        // so this test runs in well under a second, not 45.
+        var budget = DeadlineBudget.Start(550, new FakeClock(0), targetMs: 550);
+
+        await Assert.ThrowsAsync<DependencyTimeoutException>(() => storage.GetUploadedObjectAsync("applications/x/documents/y/z.pdf", budget));
+    }
 }
