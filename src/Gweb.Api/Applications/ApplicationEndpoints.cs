@@ -17,6 +17,7 @@ internal static class ApplicationEndpoints
         app.MapGet("/v1/applications/{id}", GetApplicationAsync);
         app.MapPatch("/v1/applications/{id}/applicant", PatchApplicantAsync);
         app.MapPatch("/v1/applications/{id}/business", PatchBusinessAsync);
+        app.MapPost("/v1/applications/{id}/submit", SubmitAsync);
     }
 
     // No auth exists yet (see README "Assumptions") -- the actor is whatever the
@@ -110,6 +111,26 @@ internal static class ApplicationEndpoints
                 .ConfigureAwait(false);
 
             return Results.Ok(BusinessResponse.From(business));
+        });
+
+    private static Task<IResult> SubmitAsync(
+        HttpContext httpContext,
+        string id,
+        SubmissionService submissionService,
+        IClock clock,
+        BaseConfig config,
+        StructuredLogger logger) =>
+        RequestExecution.RunAsync(httpContext, "submit_application", clock, config, logger, async budget =>
+        {
+            var applicationId = ParseApplicationId(id);
+
+            // ValidationException (blocked -- missing items in the details payload),
+            // NotFoundException, and ConflictException (concurrent submit) all flow
+            // through HttpErrorMapper automatically; nothing application-specific to
+            // catch here.
+            var result = await submissionService.SubmitAsync(applicationId, budget).ConfigureAwait(false);
+
+            return Results.Ok(SubmitResponse.From(result));
         });
 
     private static string ReadActor(HttpContext httpContext) =>

@@ -69,4 +69,30 @@ public class InMemoryDocumentRepositoryTests
         var staleWrite = NewUploadingDocument(applicationId, documentId);
         await Assert.ThrowsAsync<ConflictException>(() => repository.SaveAsync(staleWrite, expectedVersion: 1, Budget()));
     }
+
+    [Fact]
+    public async Task ListByApplicationIdReturnsEveryDocumentForThatApplicationOnly()
+    {
+        var repository = new InMemoryDocumentRepository();
+        var applicationId = Guid.NewGuid();
+        var otherApplicationId = Guid.NewGuid();
+        await repository.SaveAsync(NewUploadingDocument(applicationId, Guid.NewGuid()), expectedVersion: 0, Budget());
+        await repository.SaveAsync(NewUploadingDocument(applicationId, Guid.NewGuid()), expectedVersion: 0, Budget());
+        await repository.SaveAsync(NewUploadingDocument(otherApplicationId, Guid.NewGuid()), expectedVersion: 0, Budget());
+
+        var result = await repository.ListByApplicationIdAsync(applicationId, Budget());
+
+        Assert.Equal(2, result.Count);
+        Assert.All(result, d => Assert.Equal(applicationId, d.ApplicationId));
+    }
+
+    [Fact]
+    public async Task ListByApplicationIdReturnsEmptyWhenNoDocumentsExist()
+    {
+        var repository = new InMemoryDocumentRepository();
+
+        var result = await repository.ListByApplicationIdAsync(Guid.NewGuid(), Budget());
+
+        Assert.Empty(result);
+    }
 }

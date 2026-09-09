@@ -605,3 +605,64 @@ Known Gaps rather than glossed over.
 by design).
 
 Merged to `main` with `--no-ff`, pushed.
+
+---
+
+## 2026-09-09 (same day, continued) — Phase 9 (review & submit gate) built, verified, merged
+
+Continued straight from Phase 8 on "يس كمل" (yes, continue).
+
+**What got built:** The real "list documents for an application" DynamoDB `Query`
+(`IDocumentRepository.ListByApplicationIdAsync`) that ADR-0003 planned as an access
+pattern since Phase 2 but no caller needed until now -- not scope creep, the fulfillment
+of an already-planned design. `Gweb.Domain.Submission.SubmissionChecker` reuses the
+existing `CompletenessChecker` for applicant/business fields and adds required-document
+logic on top (Government ID, Business Registration, Bank Evidence -- the brief's
+"Conditional" types are explicitly out of scope, no rule engine exists for them).
+`IApplicationRepository.UpdateAsync` added as a deliberate third method (alongside the
+existing `CreateAsync`/`GetByIdAsync`) rather than retrofitting `Application` onto the
+`SaveAsync`/`expectedVersion=0` convention every other entity uses -- `Application`
+already had a different-shaped repository since Phase 2, and `Application.Version`
+starts at 1, not 0, so unifying the conventions would have given `expectedVersion` two
+different meanings depending on which method reads it. `SubmissionService` orchestrates
+the full check-then-submit flow. `POST /v1/applications/{id}/submit` returns the
+normalized review payload (masked applicant/business, every document's status, current
+MCC classification, current evaluation) on success, `400 VALIDATION_FAILED` with the
+precise missing-item list on a blocked submission, and relies on `Application.Submit()`'s
+existing state-machine guard for a correct `409` on a genuine double-submit -- no new
+special-casing needed. `infra/template.yaml`'s IAM policy gains `dynamodb:Query`, scoped
+to the same one table ARN as every other action -- its own comment had literally
+anticipated this exact addition since Phase 4. No new `ApplicationStatus` value added;
+`Submitted` (existing since Phase 2) is the terminal "ready for manual review" state the
+brief describes, still enforced structurally by `NoAutoApprovalPathTests`.
+
+**No behavioral bugs found this phase** (full detail in `AI-USAGE.md` §5's Phase 8
+entries, still the most recent real bugs on record): one minor `CA1859` analyzer fix in
+a test helper's return type, otherwise `dotnet build` and all 383 tests passed clean on
+the first run after each incremental addition. The Phase 8 namespace-collision lesson
+(a same-named `using` alias losing to a sibling namespace) was applied proactively this
+time -- `SubmissionService.cs` uses differently-named aliases (`DomainDocument`,
+`DomainEvaluation`) from the start rather than hitting the same bug again.
+
+**Verified for real:** the full real-HTTP journey in `SubmitEndpointTests` -- create an
+application, PATCH applicant, PATCH business, real presign/complete for all three
+required documents (through the actual `IDocumentStorage`/S3-adapter simulation, not
+shortcut), then submit -- confirming a blocked submission reports the precise missing
+items over HTTP, a successful submission's payload never contains an unmasked
+government ID or bank account number, and a second submit attempt correctly returns
+`409`. `sam validate -t infra/template.yaml --lint` confirms the extended IAM policy is
+still well-formed.
+
+**Verified for real, standard checks:** `dotnet build` (0 warnings/errors),
+`dotnet test` -- 383/383 passing (up from 355), coverage 94.5%/84.4% (up from Phase 8's
+93.7%/83.0% -- the new submission-gate code is thoroughly covered by design: every
+missing-item category, every document-status edge case, the full real-HTTP journey).
+
+**Known gaps documented honestly, not silently skipped** (full detail in README "Known
+gaps"): Conditional document types (Business License, Additional Evidence) are not
+enforced by the gate -- needs a jurisdiction/business-type rule engine this system
+doesn't have. No aggregate "review screen" endpoint exists ahead of Phase 11's
+frontend -- the granular endpoints already serve that need, and `POST /submit`'s own
+response is the normalized review payload the brief asks for.
+
+Merged to `main` with `--no-ff`, pushed.

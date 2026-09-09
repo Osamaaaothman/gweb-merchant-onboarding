@@ -27,6 +27,27 @@ public sealed class DynamoDbDocumentRepository(IAmazonDynamoDB client, string ta
         return response.IsItemSet ? FromItem(applicationId, documentId, response.Item) : null;
     }
 
+    public async Task<IReadOnlyList<Document>> ListByApplicationIdAsync(Guid applicationId, DeadlineBudget budget, CancellationToken cancellationToken = default)
+    {
+        var request = new QueryRequest
+        {
+            TableName = tableName,
+            KeyConditionExpression = "pk = :pk AND begins_with(sk, :skPrefix)",
+            ExpressionAttributeValues = new Dictionary<string, AttributeValue>
+            {
+                [":pk"] = new() { S = DynamoDbApplicationRepository.PartitionKey(applicationId) },
+                [":skPrefix"] = new() { S = "DOC#" },
+            },
+            ConsistentRead = true,
+        };
+
+        var response = await DynamoDbCallExecutor.ExecuteAsync(ct => client.QueryAsync(request, ct), budget, cancellationToken).ConfigureAwait(false);
+
+        return response.Items
+            .Select(item => FromItem(applicationId, Guid.Parse(item["documentId"].S), item))
+            .ToList();
+    }
+
     public async Task SaveAsync(Document document, long expectedVersion, DeadlineBudget budget, CancellationToken cancellationToken = default)
     {
         var request = new PutItemRequest

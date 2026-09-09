@@ -163,6 +163,7 @@ builder.Services.AddSingleton(sp => new Gweb.Services.Evaluation.EvaluationServi
 builder.Services.AddSingleton<ApplicationService>();
 builder.Services.AddSingleton<ApplicantService>();
 builder.Services.AddSingleton<BusinessService>();
+builder.Services.AddSingleton<SubmissionService>();
 builder.Services.AddSingleton(sp => new DocumentService(
     sp.GetRequiredService<IDocumentRepository>(),
     sp.GetRequiredService<IDocumentStorage>(),

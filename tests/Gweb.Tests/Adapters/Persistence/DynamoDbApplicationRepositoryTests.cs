@@ -148,4 +148,39 @@ public class DynamoDbApplicationRepositoryTests
             c => c.GetItemAsync(It.Is<GetItemRequest>(r => r.ConsistentRead == true), It.IsAny<CancellationToken>()),
             Times.Once);
     }
+
+    [Fact]
+    public async Task UpdateSucceedsWithAVersionConditionalPut()
+    {
+        var mockClient = new Mock<IAmazonDynamoDB>();
+        mockClient
+            .Setup(c => c.PutItemAsync(It.IsAny<PutItemRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PutItemResponse());
+        var repository = new DynamoDbApplicationRepository(mockClient.Object, TableName);
+        var application = NewApplication();
+        application.Submit(DateTimeOffset.UtcNow);
+
+        await repository.UpdateAsync(application, expectedVersion: 1, Budget());
+
+        mockClient.Verify(
+            c => c.PutItemAsync(
+                It.Is<PutItemRequest>(r =>
+                    r.TableName == TableName &&
+                    r.ConditionExpression == "attribute_exists(pk) AND version = :expectedVersion" &&
+                    r.ExpressionAttributeValues[":expectedVersion"].N == "1"),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task UpdateTranslatesAConditionalCheckFailureIntoConflictException()
+    {
+        var mockClient = new Mock<IAmazonDynamoDB>();
+        mockClient
+            .Setup(c => c.PutItemAsync(It.IsAny<PutItemRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new ConditionalCheckFailedException("failed"));
+        var repository = new DynamoDbApplicationRepository(mockClient.Object, TableName);
+
+        await Assert.ThrowsAsync<ConflictException>(() => repository.UpdateAsync(NewApplication(), expectedVersion: 1, Budget()));
+    }
 }
