@@ -49,4 +49,38 @@ public class InMemoryApplicationRepositoryTests
 
         await Assert.ThrowsAsync<ConflictException>(() => repository.CreateAsync(second, Budget()));
     }
+
+    [Fact]
+    public async Task UpdateAsyncPersistsAStatusChange()
+    {
+        var repository = new InMemoryApplicationRepository();
+        var application = Application.Create(Guid.NewGuid(), DateTimeOffset.UtcNow, "actor", "corr-1");
+        await repository.CreateAsync(application, Budget());
+
+        var expectedVersion = application.Version;
+        application.Submit(DateTimeOffset.UtcNow);
+        await repository.UpdateAsync(application, expectedVersion, Budget());
+
+        var result = await repository.GetByIdAsync(application.Id, Budget());
+        Assert.Equal(ApplicationStatus.Submitted, result!.Status);
+    }
+
+    [Fact]
+    public async Task UpdateAsyncThrowsWhenTheApplicationDoesNotExist()
+    {
+        var repository = new InMemoryApplicationRepository();
+        var application = Application.Create(Guid.NewGuid(), DateTimeOffset.UtcNow, "actor", "corr-1");
+
+        await Assert.ThrowsAsync<ConflictException>(() => repository.UpdateAsync(application, expectedVersion: 1, Budget()));
+    }
+
+    [Fact]
+    public async Task UpdateAsyncRejectsAStaleVersion()
+    {
+        var repository = new InMemoryApplicationRepository();
+        var application = Application.Create(Guid.NewGuid(), DateTimeOffset.UtcNow, "actor", "corr-1");
+        await repository.CreateAsync(application, Budget());
+
+        await Assert.ThrowsAsync<ConflictException>(() => repository.UpdateAsync(application, expectedVersion: 999, Budget()));
+    }
 }

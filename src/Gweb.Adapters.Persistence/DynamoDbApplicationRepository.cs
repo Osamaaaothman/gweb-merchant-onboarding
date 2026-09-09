@@ -56,6 +56,29 @@ public sealed class DynamoDbApplicationRepository(IAmazonDynamoDB client, string
         return response.IsItemSet ? FromItem(response.Item) : null;
     }
 
+    public async Task UpdateAsync(Application application, long expectedVersion, DeadlineBudget budget, CancellationToken cancellationToken = default)
+    {
+        var request = new PutItemRequest
+        {
+            TableName = tableName,
+            Item = ToItem(application),
+            ConditionExpression = "attribute_exists(pk) AND version = :expectedVersion",
+            ExpressionAttributeValues = new Dictionary<string, AttributeValue>
+            {
+                [":expectedVersion"] = new() { N = expectedVersion.ToString(CultureInfo.InvariantCulture) },
+            },
+        };
+
+        try
+        {
+            await DynamoDbCallExecutor.ExecuteAsync(ct => client.PutItemAsync(request, ct), budget, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ConditionalCheckFailedException)
+        {
+            throw new ConflictException($"Application {application.Id} was modified concurrently.");
+        }
+    }
+
     internal static string PartitionKey(Guid id) => $"APP#{id}";
 
     private static Dictionary<string, AttributeValue> ToItem(Application application) => new()

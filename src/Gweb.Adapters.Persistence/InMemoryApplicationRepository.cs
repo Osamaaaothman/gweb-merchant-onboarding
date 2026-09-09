@@ -32,4 +32,18 @@ public sealed class InMemoryApplicationRepository : IApplicationRepository
         _store.TryGetValue(id, out var application);
         return Task.FromResult(application?.Snapshot());
     }
+
+    public Task UpdateAsync(Application application, long expectedVersion, DeadlineBudget budget, CancellationToken cancellationToken = default)
+    {
+        var snapshot = application.Snapshot();
+
+        _store.AddOrUpdate(
+            application.Id,
+            addValueFactory: _ => throw new ConflictException($"Application {application.Id} does not exist."),
+            updateValueFactory: (_, current) => current.Version == expectedVersion
+                ? snapshot
+                : throw new ConflictException($"Application {application.Id} was modified concurrently."));
+
+        return Task.CompletedTask;
+    }
 }

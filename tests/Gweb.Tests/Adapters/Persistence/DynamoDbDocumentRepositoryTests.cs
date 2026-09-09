@@ -87,4 +87,59 @@ public class DynamoDbDocumentRepositoryTests
 
         await Assert.ThrowsAsync<ConflictException>(() => repository.SaveAsync(document, expectedVersion: 0, Budget()));
     }
+
+    [Fact]
+    public async Task ListByApplicationIdQueriesByPartitionKeyAndTheDocSortKeyPrefix()
+    {
+        var applicationId = Guid.NewGuid();
+        var documentId = Guid.NewGuid();
+        var item = new Dictionary<string, AttributeValue>
+        {
+            ["documentId"] = new AttributeValue { S = documentId.ToString() },
+            ["documentType"] = new AttributeValue { S = "GovernmentId" },
+            ["status"] = new AttributeValue { S = "Received" },
+            ["originalFilename"] = new AttributeValue { S = "id.pdf" },
+            ["contentType"] = new AttributeValue { S = "application/pdf" },
+            ["declaredSizeBytes"] = new AttributeValue { N = "1024" },
+            ["s3Key"] = new AttributeValue { S = $"applications/{applicationId}/documents/{documentId}/x.pdf" },
+            ["declaredChecksumSha256"] = new AttributeValue { S = "abc==" },
+            ["version"] = new AttributeValue { N = "1" },
+            ["createdAt"] = new AttributeValue { S = DateTimeOffset.UtcNow.ToString("O") },
+            ["updatedAt"] = new AttributeValue { S = DateTimeOffset.UtcNow.ToString("O") },
+            ["createdBy"] = new AttributeValue { S = "actor" },
+            ["correlationId"] = new AttributeValue { S = "corr-1" },
+        };
+        var mockClient = new Mock<IAmazonDynamoDB>();
+        mockClient
+            .Setup(c => c.QueryAsync(It.IsAny<QueryRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new QueryResponse { Items = [item] });
+        var repository = new DynamoDbDocumentRepository(mockClient.Object, TableName);
+
+        var result = await repository.ListByApplicationIdAsync(applicationId, Budget());
+
+        Assert.Single(result);
+        Assert.Equal(documentId, result[0].Id);
+        mockClient.Verify(
+            c => c.QueryAsync(
+                It.Is<QueryRequest>(r =>
+                    r.TableName == TableName &&
+                    r.KeyConditionExpression == "pk = :pk AND begins_with(sk, :skPrefix)" &&
+                    r.ExpressionAttributeValues[":skPrefix"].S == "DOC#"),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task ListByApplicationIdReturnsEmptyWhenTheQueryHasNoMatches()
+    {
+        var mockClient = new Mock<IAmazonDynamoDB>();
+        mockClient
+            .Setup(c => c.QueryAsync(It.IsAny<QueryRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new QueryResponse { Items = [] });
+        var repository = new DynamoDbDocumentRepository(mockClient.Object, TableName);
+
+        var result = await repository.ListByApplicationIdAsync(Guid.NewGuid(), Budget());
+
+        Assert.Empty(result);
+    }
 }

@@ -19,6 +19,12 @@ public sealed class InMemoryDocumentRepository : IDocumentRepository
         return Task.FromResult<Document?>(null);
     }
 
+    public Task<IReadOnlyList<Document>> ListByApplicationIdAsync(Guid applicationId, DeadlineBudget budget, CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<Document> matches = [.. _store.Values.Where(d => d.ApplicationId == applicationId).Select(d => d.Snapshot())];
+        return Task.FromResult(matches);
+    }
+
     public Task SaveAsync(Document document, long expectedVersion, DeadlineBudget budget, CancellationToken cancellationToken = default)
     {
         var snapshot = document.Snapshot();
