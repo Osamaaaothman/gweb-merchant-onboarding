@@ -58,6 +58,7 @@ if (string.Equals(persistenceProvider, "inmemory", StringComparison.OrdinalIgnor
     builder.Services.AddSingleton<IDocumentRepository, InMemoryDocumentRepository>();
     builder.Services.AddSingleton<IDocumentStorage, InMemoryDocumentStorage>();
     builder.Services.AddSingleton<IMcClassificationRepository, InMemoryMcClassificationRepository>();
+    builder.Services.AddSingleton<IEvaluationRepository, InMemoryEvaluationRepository>();
 }
 else
 {
@@ -82,6 +83,8 @@ else
         sp => new DynamoDbDocumentRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
     builder.Services.AddSingleton<IMcClassificationRepository>(
         sp => new DynamoDbMcClassificationRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
+    builder.Services.AddSingleton<IEvaluationRepository>(
+        sp => new DynamoDbEvaluationRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
 
     var documentsBucketName = AppConfigLoader.RequireEnv("DOCUMENTS_BUCKET_NAME", Environment.GetEnvironmentVariable);
     // S3_SERVICE_URL mirrors DYNAMODB_SERVICE_URL -- unset in every deployed
@@ -146,6 +149,17 @@ builder.Services.AddSingleton(sp => new ClassificationService(
     sp.GetRequiredService<IClock>(),
     sp.GetRequiredService<StructuredLogger>()));
 
+builder.Services.AddSingleton(sp => new Gweb.Services.Evaluation.EvaluationService(
+    sp.GetRequiredService<IEvaluationRepository>(),
+    sp.GetRequiredService<IBusinessRepository>(),
+    sp.GetRequiredService<IDocumentRepository>(),
+    sp.GetRequiredService<IDocumentStorage>(),
+    sp.GetRequiredService<IMcClassificationRepository>(),
+    sp.GetRequiredService<IEvaluationProvider>(),
+    sp.GetRequiredService<MockEvaluationProvider>(),
+    sp.GetRequiredService<IClock>(),
+    sp.GetRequiredService<StructuredLogger>()));
+
 builder.Services.AddSingleton<ApplicationService>();
 builder.Services.AddSingleton<ApplicantService>();
 builder.Services.AddSingleton<BusinessService>();
@@ -162,6 +176,7 @@ app.MapApplicationEndpoints();
 app.MapDocumentEndpoints();
 app.MapMcEndpoints();
 app.MapClassificationEndpoints();
+app.MapEvaluationEndpoints();
 
 app.Run();
 
