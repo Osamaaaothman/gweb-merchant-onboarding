@@ -1,14 +1,15 @@
 import { motion } from 'motion/react'
-import { useState } from 'react'
+import { useDeferredValue, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { AlertTriangle, Sparkles } from 'lucide-react'
+import { AlertTriangle, Loader2, Search, Sparkles } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import { StepFooter } from '@/components/shared/StepFooter'
 import { StepHeader } from '@/components/shared/StepHeader'
-import { useClassification, useClassify, useConfirmClassification } from '@/hooks/use-application'
+import { useClassification, useClassify, useConfirmClassification, useMccSearch } from '@/hooks/use-application'
 import { cn } from '@/lib/utils'
 import type { ApplicationDetail } from '@/lib/types'
 
@@ -18,15 +19,23 @@ export function ClassificationStep({ application }: { application: ApplicationDe
   const classify = useClassify(application.id)
   const confirm = useConfirmClassification(application.id)
   const [selected, setSelected] = useState<string | null>(null)
+  const [manualQuery, setManualQuery] = useState('')
+  const deferredQuery = useDeferredValue(manualQuery)
+  const { data: searchResults, isFetching: isSearching } = useMccSearch(deferredQuery)
 
   const activeCode = selected ?? classification?.selfSelectedMccCode ?? classification?.proposedMccCode ?? null
+  const activeCodeNotInCandidates =
+    activeCode && !classification?.candidates.some((c) => c.mccCode === activeCode)
+  const activeCodeDetail = activeCodeNotInCandidates
+    ? searchResults?.results.find((r) => r.code === activeCode)
+    : undefined
 
   return (
     <div>
       <StepHeader
         eyebrow="Step 4 of 6"
         title="Business classification"
-        description="Based on the business description you provided, we'll propose a Merchant Category Code (MCC). Confirm it, or choose a different one."
+        description="Based on the business description you provided, we'll propose a Merchant Category Code (MCC). Confirm it, or search for a different one yourself."
       />
 
       {!classification && !isLoading && (
@@ -96,16 +105,71 @@ export function ClassificationStep({ application }: { application: ApplicationDe
             )
           })}
 
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => classify.mutate()}
-            disabled={classify.isPending}
-          >
+          <Button variant="ghost" size="sm" onClick={() => classify.mutate()} disabled={classify.isPending}>
             {classify.isPending ? 'Re-classifying...' : 'Re-run classification'}
           </Button>
         </div>
       )}
+
+      <div className="mt-8">
+        <p className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          Not right? Search for a code yourself
+        </p>
+        <div className="relative">
+          <Search className="absolute top-1/2 left-3.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={manualQuery}
+            onChange={(e) => setManualQuery(e.target.value)}
+            placeholder="Search by code or keyword -- e.g. &quot;sports club&quot; or 7997"
+            className="pl-10"
+          />
+        </div>
+
+        {activeCodeNotInCandidates && (
+          <div className="mt-2 flex items-center justify-between rounded-lg border border-primary/30 bg-primary/5 px-3.5 py-2.5 text-sm">
+            <span>
+              <span className="font-mono font-semibold text-foreground">{activeCode}</span>
+              {activeCodeDetail && <span className="ml-2 text-muted-foreground">{activeCodeDetail.description}</span>}
+              {!activeCodeDetail && <span className="ml-2 text-muted-foreground">Selected manually</span>}
+            </span>
+            <Badge variant="premium">Selected</Badge>
+          </div>
+        )}
+
+        {manualQuery.length > 0 && (
+          <div className="mt-2 max-h-64 space-y-1 overflow-y-auto rounded-lg border border-border bg-card p-1.5">
+            {isSearching && (
+              <p className="flex items-center gap-2 px-2.5 py-2 text-xs text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin" /> Searching...
+              </p>
+            )}
+            {!isSearching && searchResults?.results.length === 0 && (
+              <p className="px-2.5 py-2 text-xs text-muted-foreground">
+                No catalog matches for "{manualQuery}" -- try a shorter or different keyword.
+              </p>
+            )}
+            {searchResults?.results.map((code) => (
+              <button
+                key={code.code}
+                type="button"
+                onClick={() => setSelected(code.code)}
+                className={cn(
+                  'flex w-full items-center justify-between gap-3 rounded-md px-2.5 py-2 text-left text-sm transition-colors hover:bg-secondary',
+                  activeCode === code.code && 'bg-primary/5 ring-1 ring-primary/20',
+                )}
+              >
+                <span className="min-w-0">
+                  <span className="font-mono font-medium text-foreground">{code.code}</span>
+                  <span className="ml-2 text-muted-foreground">{code.description}</span>
+                </span>
+                <Badge variant="outline" className="shrink-0 text-[10px]">
+                  {code.category}
+                </Badge>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       <StepFooter
         onBack={() => navigate(`/applications/${application.id}/documents`)}
