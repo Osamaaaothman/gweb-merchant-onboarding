@@ -17,4 +17,17 @@ public interface IEvaluationProvider
         IReadOnlyList<McCandidateSeed> catalogHints,
         DeadlineBudget budget,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// <paramref name="documentBytes"/> is the raw processing-statement file (PDF or
+    /// image) -- a real implementation may read it directly (Gemini's API accepts
+    /// inline document/image parts); the mock implementation ignores the bytes
+    /// entirely and returns a fixture, per brief "Statement extraction into normalized
+    /// values (from fixture in mock mode)."
+    /// </summary>
+    Task<StatementExtraction> ExtractStatementAsync(
+        byte[] documentBytes,
+        string contentType,
+        DeadlineBudget budget,
+        CancellationToken cancellationToken = default);
 }
