@@ -902,3 +902,71 @@ literally.
 DynamoDB round-trip regression test finally exercising a previously-untested branch).
 
 Merged to `main` with `--no-ff`, pushed.
+
+---
+
+## 2026-09-09 (same day, continued) — Phase 13 (final documentation & IAM hardening) built, merged
+
+Continued on Osama's "طيب اوك كمل الباقي كاملا وجهزلي كل اشي" (ok, complete the rest
+fully and prepare everything) after he asked directly whether every brief requirement
+was actually done -- it wasn't; this phase is the honest answer to that question.
+
+**What got built, all five brief-mandated deliverable documents:**
+
+- `docs/ARCHITECTURE.md` -- one Mermaid diagram (renders natively on GitHub) plus
+  prose covering request flow, the DynamoDB and S3 data flows, the AI external call,
+  and a consolidated "Timeouts, retries, and failure states" section pulling together
+  what Phases 1-10 built into one place a reviewer can read without cross-referencing
+  six ADRs.
+- `docs/openapi.yaml` -- a complete, hand-written OpenAPI 3.0 spec (15 paths, 22
+  schemas), built directly from the real C# request/response DTOs rather than
+  guessed. Validated for real: parses as YAML (`npx js-yaml`), and every single
+  `$ref` in the document resolves to an actually-defined schema (checked
+  programmatically, not by eye).
+- `docs/SECURITY.md` -- filled in the brief's own threat-model table
+  (`docs/04-SECURITY-RULES.md` §8) honestly for all nine named threats, an IAM audit
+  (see below), the KMS-vs-current-encryption tradeoff the brief explicitly asks to be
+  addressed, redaction decisions, secrets management, and the data retention/deletion
+  design (not implemented, but the brief only requires it be written down).
+- `docs/TEST-EVIDENCE.md` -- real output from actually running `dotnet build`/`dotnet
+  test` this session (399/399, 3s), plus the specific hanging-dependency tests run in
+  isolation with their real per-test millisecond timings, plus the real structured-log
+  durations captured from one live run of the Phase 12 end-to-end journey test --
+  every individual step of a 15-step real journey completed in under 25ms against the
+  in-memory adapters, concrete evidence the 45-second budget is nowhere close to
+  binding under normal operation.
+- `docs/DEMO.md` -- a frontend walkthrough plus an equivalent `curl` walkthrough.
+  The `curl` version was not just written from expectation -- run step-by-step
+  against a real running backend before being committed, confirming every response
+  shown (including the exact classify result, MCC 5411 at 90% confidence for the
+  grocery description) is what the system actually returns, not what it should
+  return.
+
+**IAM audit** (`docs/SECURITY.md` "IAM approach", per `docs/04-SECURITY-RULES.md` §4's
+"be able to justify every single permission... if you cannot justify it, remove it"):
+re-reviewed `infra/template.yaml`'s policy action-by-action against the real code
+paths that use each one. Conclusion: nothing to remove -- the policy was already
+exactly the minimum the code needs (no `UpdateItem`/`DeleteItem`/`Scan`/`s3:DeleteObject`/
+`ListBucket`, because nothing in the codebase calls any of them). Documented as a
+completed audit with a "nothing found" result, not left unaudited.
+
+**A real inaccuracy caught before it shipped:** the first draft of `docs/SECURITY.md`
+claimed a PII-redaction regression test (the brief's own suggested security evidence)
+didn't exist and listed it as a gap. Checking before asserting turned up
+`PiiRedactionEndToEndTests.PatchingAFullyPopulatedApplicantAndBusinessNeverLogsAnySensitiveRawValue`,
+already built in an earlier phase -- corrected the document to cite it as real
+evidence instead of a false gap claim.
+
+**README updates:** every remaining `(TBD — Phase 13)` marker replaced with a real
+link (architecture doc, OpenAPI spec, deployment instructions, cleanup/teardown --
+both written correctly but not executed against a real AWS account, honestly labelled
+as such); a new "Deliverables" table near the top mapping every brief-named
+deliverable to exactly where it lives in this repo.
+
+**Verified for real, standard checks:** `dotnet build` clean, `dotnet test` --
+399/399 passing (no source code changed this phase, documentation only -- the number
+is unchanged from Phase 12, re-confirmed rather than assumed). Every command shown in
+`docs/DEMO.md`'s curl walkthrough was actually executed against a real running
+backend and its real output compared against what the document claims.
+
+Merged to `main` with `--no-ff`, pushed.
