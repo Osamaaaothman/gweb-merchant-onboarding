@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 7 — AI adapter & MCC classification.** This README grows with
+> **Status: Phase 8 — rate evaluation & risk signals.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -95,13 +95,29 @@ a reviewer. See [`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-eva
 for the full design, including a real empirical finding (this model's latency runs
 close to the system's 35s internal target) and how the code defends against it.
 
+Rate evaluation (`POST /v1/applications/{id}/evaluate`) extends the same provider with
+real **multimodal** statement extraction -- `GeminiEvaluationProvider` sends the actual
+document bytes to Gemini as an inline part (verified against the live API: a realistic
+synthetic statement was correctly parsed into every normalized field plus a one-sentence
+commentary, in ~6 seconds). `EffectiveRateCalculator` is pure, deterministic arithmetic
+that never reads anything but the five numeric fields a provider reported -- no AI
+output can reach the math through any other path. `RiskSignalDetector` is equally
+deterministic: every signal (contradictions, missing evidence, unusually high ticket,
+MCC mismatch, incomplete ownership, regulated-activity mentions) is computed from data
+already in the system, and every one cites a `sourceField` (brief "no unexplained
+flags"). The response separates `extracted` / `calculated` / `commentary` as distinct
+top-level fields. If the deadline budget is too low to attempt evaluation at all, the
+endpoint returns `202` with the record marked `Processing`, pollable via `GET`. See
+[`docs/adr/0007-rate-evaluation-and-risk-signals.md`](docs/adr/0007-rate-evaluation-and-risk-signals.md).
+
 Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
 [`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md),
 [`docs/adr/0003-dynamodb-table-strategy.md`](docs/adr/0003-dynamodb-table-strategy.md),
 [`docs/adr/0004-mcc-catalog-storage.md`](docs/adr/0004-mcc-catalog-storage.md),
 [`docs/adr/0005-risk-policy-representation.md`](docs/adr/0005-risk-policy-representation.md),
-[`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-evaluation-provider.md).
+[`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-evaluation-provider.md),
+[`docs/adr/0007-rate-evaluation-and-risk-signals.md`](docs/adr/0007-rate-evaluation-and-risk-signals.md).
 
 ## Tech stack
 
@@ -341,6 +357,31 @@ curl -i -X POST http://localhost:5280/v1/applications/<id>/classify/confirm \
 # Current classification state, without re-running classification
 curl http://localhost:5280/v1/applications/<id>/classify
 # -> 200, same shape as above; 404 NOT_FOUND if classify has never been called
+
+# Evaluate without a processing statement -- still runs risk-signal detection
+curl -i -X POST http://localhost:5280/v1/applications/<id>/evaluate \
+  -H "Content-Type: application/json" -d '{}'
+# -> 200, { status: "Completed", extracted: null, calculated: null, commentary: null,
+#           riskSignals: [{ code: "MISSING_PROCESSING_STATEMENT", message, sourceField: "processingStatementDocumentId" }, ...],
+#           processingStatementDocumentId: null, evaluatedAt, version }
+
+# Evaluate with a completed ProcessingStatement document (documentId from its own
+# presign/complete response -- see the document examples above)
+curl -i -X POST http://localhost:5280/v1/applications/<id>/evaluate \
+  -H "Content-Type: application/json" -d '{"processingStatementDocumentId":"<documentId>"}'
+# -> 200, { status: "Completed",
+#           extracted: { processor, monthlyVolume, discountRatePercent, perTransactionFee, monthlyFee, chargebackFeeTotal, statementPeriod, provider },
+#           calculated: { totalMonthlyCostAmount, effectiveRatePercent, discountFeeAmount, transactionFeeAmount, monthlyFeeAmount, chargebackFeeAmount },
+#           commentary: "...", riskSignals: [...], processingStatementDocumentId, evaluatedAt, version }
+# -> 202 Accepted, { status: "Processing", ... } if the deadline budget was too low to
+#    attempt evaluation at all -- poll the GET endpoint below
+# Real example against a live Gemini call, verified during this phase's build for a
+# realistic synthetic statement: extracted.provider: "gemini", monthlyVolume: 48732.15,
+# discountRatePercent: 2.65, matching the statement exactly
+
+# Current evaluation state, without re-running evaluation
+curl http://localhost:5280/v1/applications/<id>/evaluation
+# -> 200, same shape as above; 404 NOT_FOUND if evaluate has never been called
 ```
 
 ## Seeding / refreshing the MCC catalog
@@ -486,6 +527,32 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   real `sam deploy`. A production setup should source it from SSM Parameter Store
   instead (the shape is already documented in `docs/06-COLLABORATION-PROTOCOL.md`), so
   the key never passes through a CloudFormation parameter, `NoEcho` or not.
+- **No "list documents by application + type" query exists** — `POST .../evaluate`
+  requires the caller to name the processing-statement document by ID (from their own
+  presign/complete response) rather than the server auto-discovering it. A real
+  document-browsing UI would want this; deferred rather than adding a new DynamoDB
+  access pattern under time pressure for a single-caller flow that already has the ID.
+  See ADR-0007.
+- **"Regulated-license claims without evidence" only checks for a keyword in the
+  business description, not an actual missing license document** — the stronger
+  version needs the same list-documents query named above. Still a genuinely useful
+  signal, just not the strongest possible version. See ADR-0007.
+- **The async-fallback (`202` + `Processing` + poll) contract has no real background
+  worker behind it.** The response shape, state machine, and poll endpoint are real and
+  tested; nothing currently advances a stuck `Processing` record except the client
+  calling `evaluate` again with more budget. A production system needs an actual async
+  completion path (SQS/Step Functions) — explicitly out of scope until Phase 10. See
+  ADR-0007.
+- **Statement extraction sends real document bytes to Gemini as a multimodal inline
+  part** (not just text) when `AI_PROVIDER=gemini` — verified against the live API, but
+  only by running `GeminiEvaluationProvider.ExtractStatementAsync` directly against a
+  realistic synthetic statement, not through the full HTTP → S3 → evaluate pipeline
+  (this session has no AWS account to actually upload a real file to S3, and
+  `InMemoryDocumentStorage` has no HTTP-reachable way to seed real bytes outside a test
+  process). The orchestration around it (`EvaluationService`, the HTTP endpoints) is
+  fully tested end-to-end against a simulated upload with a fake provider — only the
+  combination of "real HTTP upload + real Gemini multimodal call in one live run" is
+  unverified. See ADR-0007 "What's verified" for exactly what was and wasn't run.
 
 ## What is real vs. mocked
 
@@ -507,7 +574,7 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 ## Test coverage
 
 Measured by running `dotnet test --collect:"XPlat Code Coverage" --settings
-coverlet.runsettings` (last run: 294 tests, all passing; generated-code excluded per
+coverlet.runsettings` (last run: 355 tests, all passing; generated-code excluded per
 `coverlet.runsettings`):
 
 | Assembly | Line coverage | Branch coverage |
@@ -517,21 +584,20 @@ coverlet.runsettings` (last run: 294 tests, all passing; generated-code excluded
 | `Gweb.Adapters.Mcc` | 100% | 88.9% |
 | `Gweb.Adapters.RiskPolicy` | 100% | 83.3% |
 | `Gweb.Shared` | 99.3% | 95.7% |
-| `Gweb.Services` | 95.7% | 85.7% |
-| `Gweb.Adapters.Persistence` | 98.2% | 78.4% |
-| `Gweb.Domain` | 90.4% | 87.0% |
-| `Gweb.Api` | 87.9% | 67.2% |
-| `Gweb.Adapters.Evaluation` | 86.7% | 54.2% |
-| **Overall** | **92.6%** | **82.2%** |
+| `Gweb.Services` | 96.5% | 85.7% |
+| `Gweb.Adapters.Persistence` | 98.6% | 78.6% |
+| `Gweb.Domain` | 91.8% | 88.2% |
+| `Gweb.Api` | 89.4% | 71.2% |
+| `Gweb.Adapters.Evaluation` | 90.9% | 54.0% |
+| **Overall** | **93.7%** | **83.0%** |
 
-The two real movers this phase: `Gweb.Adapters.Evaluation` (new) sits lower than every
-other adapter — `GeminiEvaluationProvider` has more independent failure-mode branches
-(size limit, non-success status, timeout, malformed JSON, MAX_TOKENS, safety-filter
-empty content, markdown-fence stripping) than the 10 tests covering it exercise every
-combination of; each path *is* tested, just not every pairwise combination.
-`Gweb.Services` moved off 100% for the first time since Phase 2 — `ClassificationService`'s
-`ReferenceEquals(primaryProvider, fallbackProvider)` fast-path (the `AI_PROVIDER=mock`
-case) isn't independently unit-tested at the service layer, only exercised indirectly
-through the HTTP endpoint tests, which all run under forced `AI_PROVIDER=mock`. Numbers
-re-measured and reported per-phase; a stale percentage from an earlier phase is never
-left standing in for what a later phase actually covers.
+Up across the board this phase (93.7%/83.0% vs. Phase 7's 92.6%/82.2%) — the new
+domain code (`EffectiveRateCalculator`, `RiskSignalDetector`, `Evaluation`) is
+thoroughly covered by design (small, pure functions with explicit edge-case tests for
+the gate: zero-volume, missing-data, every named signal category). `Gweb.Adapters.Evaluation`'s
+branch coverage stays the lowest of any assembly for the same reason as Phase 7:
+`GeminiEvaluationProvider` now has even more independent failure-mode branches
+(everything from Phase 7 plus extraction-specific paths — missing fields, no-retry-on-failure)
+than the test suite exercises every pairwise combination of; each path *is* tested
+individually. Numbers re-measured and reported per-phase; a stale percentage from an
+earlier phase is never left standing in for what a later phase actually covers.
