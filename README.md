@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 4 — document upload & S3.** This README grows with
+> **Status: Phase 5 — MCC catalog.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -61,10 +61,20 @@ in `src/Gweb.Domain/Applications/`) — the full value is never stored, never lo
 and never returned in a response, because it never exists anywhere past that one
 conversion call.
 
+The MCC catalog (`GET /v1/mcc?query=...`) is **packaged static data**, not DynamoDB —
+~300 read-only reference rows with no per-application state and no need for a
+database's guarantees. See [`docs/adr/0004-mcc-catalog-storage.md`](docs/adr/0004-mcc-catalog-storage.md)
+for the full reasoning, including an honest note on where the data came from (the
+brief's named source, the Visa Merchant Data Standards Manual, is a paid/licensed
+document this session has no access to — the catalog was compiled from the
+well-established public MCC taxonomy instead, flagged as a deliberate substitution,
+not a silent one).
+
 Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
 [`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md),
-[`docs/adr/0003-dynamodb-table-strategy.md`](docs/adr/0003-dynamodb-table-strategy.md).
+[`docs/adr/0003-dynamodb-table-strategy.md`](docs/adr/0003-dynamodb-table-strategy.md),
+[`docs/adr/0004-mcc-catalog-storage.md`](docs/adr/0004-mcc-catalog-storage.md).
 
 ## Tech stack
 
@@ -204,8 +214,6 @@ dotnet test --collect:"XPlat Code Coverage" --settings coverlet.runsettings \
 `[GeneratedRegex]` state machines in `Redactor.cs`) from coverage — that code wasn't
 hand-written and shouldn't be judged as if it were.
 
-## Seeding the MCC catalog **(TBD — Phase 5)**
-
 ## Deployment instructions **(TBD — Phase 13)**
 
 ## Cleanup / teardown **(TBD — Phase 13)**
@@ -274,7 +282,40 @@ curl -i -X POST http://localhost:5280/v1/applications/<id>/documents/<documentId
 # Fetch a document's current lifecycle state
 curl http://localhost:5280/v1/applications/<id>/documents/<documentId>
 # -> 200, { id, applicationId, type, status, originalFilename, contentType, ... }
+
+# Search the MCC catalog -- by code, code prefix, or description substring
+curl http://localhost:5280/v1/mcc?query=grocery
+# -> 200, { query: "grocery", results: [ { code: "5411", description: "Grocery Stores, Supermarkets", category: "Retail" } ] }
+
+curl http://localhost:5280/v1/mcc?query=60
+# -> 200, code-prefix matches (6010, 6011, 6012, ...) ranked ahead of description-only matches
+
+curl http://localhost:5280/v1/mcc
+# -> 200, first 25 codes ordered by code -- a browsing default when no query is given
 ```
+
+## Seeding / refreshing the MCC catalog
+
+The catalog is packaged static data, not a database seed step — see
+[`docs/adr/0004-mcc-catalog-storage.md`](docs/adr/0004-mcc-catalog-storage.md) for why.
+To update it:
+
+```bash
+# 1. Edit the source-of-truth file
+#    tools/McCatalogImport/source/mcc-codes-source.psv (pipe-delimited: code|description|category)
+
+# 2. Regenerate the embedded resource the app actually loads
+dotnet run --project tools/McCatalogImport
+# -> validates every row (4-digit code, non-empty fields, no duplicates -- fails
+#    loudly with the exact line number on any violation) and writes
+#    src/Gweb.Adapters.Mcc/Resources/mcc-codes.json
+
+# 3. Review the diff, then
+dotnet test
+```
+
+No code change needed for a routine catalog update — only the source file and a
+re-run of the tool.
 
 ## Assumptions
 
@@ -360,6 +401,13 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 - **Phase 3's DynamoDB-backed repositories were not verified against a live DynamoDB
   Local** in this session (Docker needed re-approval) — see "Testing the
   `/v1/applications` endpoints" above for exactly what was and wasn't verified.
+- **The MCC catalog's data source is a well-established public MCC reference, not the
+  brief's named source (the paid/licensed Visa Merchant Data Standards Manual)** — this
+  session has no access to that manual. Every code the assessment's acceptance
+  criteria actually depend on (6012, 6051, 6211 for Phase 6) is present and
+  test-verified by code; the remaining ~270 entries have not been cross-checked
+  word-for-word against an authoritative paid source. See ADR-0004 for the full
+  reasoning and what a real refresh against the licensed manual would look like.
 
 ## What is real vs. mocked
 
@@ -371,7 +419,7 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 ## Test coverage
 
 Measured by running `dotnet test --collect:"XPlat Code Coverage" --settings
-coverlet.runsettings` (last run: 215 tests, all passing; generated-code excluded per
+coverlet.runsettings` (last run: 238 tests, all passing; generated-code excluded per
 `coverlet.runsettings`):
 
 | Assembly | Line coverage | Branch coverage |
@@ -379,17 +427,18 @@ coverlet.runsettings` (last run: 215 tests, all passing; generated-code excluded
 | `Gweb.Services` | 100% | 100% |
 | `Gweb.Config` | 100% | 100% |
 | `Gweb.Adapters.Storage` | 100% | 100% |
+| `Gweb.Adapters.Mcc` | 100% | 88.9% |
 | `Gweb.Shared` | 99.3% | 95.7% |
 | `Gweb.Adapters.Persistence` | 97.8% | 78.8% |
 | `Gweb.Domain` | 89.8% | 86.7% |
-| `Gweb.Api` | 88.0% | 66.7% |
-| **Overall** | **92.4%** | **84.4%** |
+| `Gweb.Api` | 88.5% | 66.7% |
+| **Overall** | **92.6%** | **84.7%** |
 
-Roughly flat vs. Phase 3 (92.2%/84.8%), with the same kind of explainable variance:
-`Gweb.Api`'s branch coverage dipped slightly because `DocumentEndpoints.cs` adds a few
-error-path branches (unknown content type, oversized declared size, not-yet-uploaded)
-that aren't each independently exercised at the HTTP layer when the equivalent case is
-already covered at the `DocumentService` unit-test level (`CompleteThrowsWhenNoUploadHasLandedYet`,
-etc.) — covered logic, just not every branch covered *twice*. Numbers re-measured and
-reported per-phase; a stale percentage from an earlier phase is never left standing in
-for what a later phase actually covers.
+Essentially flat vs. Phase 4 (92.4%/84.4%) — the new `Gweb.Adapters.Mcc` assembly
+carries its own coverage close to full; the small overall move is normal variance, not
+a quality shift. `Gweb.Adapters.Mcc`'s uncovered branches are ranking-tie edge cases in
+`StaticMccCatalog.Search` (e.g. a query matching zero of the three ranking groups
+simultaneously) that don't occur for any query used across the 276-row real dataset in
+tests — real logic, just not every theoretical branch combination exercised. Numbers
+re-measured and reported per-phase; a stale percentage from an earlier phase is never
+left standing in for what a later phase actually covers.
