@@ -3,6 +3,7 @@ using Amazon.DynamoDBv2;
 using Amazon.S3;
 using Gweb.Adapters.Mcc;
 using Gweb.Adapters.Persistence;
+using Gweb.Adapters.RiskPolicy;
 using Gweb.Adapters.Storage;
 using Gweb.Api;
 using Gweb.Api.Applications;
@@ -12,6 +13,7 @@ using Gweb.Config;
 using Gweb.Domain.Applications;
 using Gweb.Domain.Documents;
 using Gweb.Domain.Mcc;
+using Gweb.Domain.RiskPolicy;
 using Gweb.Services.Applications;
 using Gweb.Services.Documents;
 using Gweb.Services.Mcc;
@@ -94,6 +96,12 @@ else
 // PERSISTENCE_PROVIDER at all, since it involves no AWS resource in either branch.
 builder.Services.AddSingleton<IMccCatalog, StaticMccCatalog>();
 builder.Services.AddSingleton<McCatalogService>();
+
+// Same reasoning as the MCC catalog (docs/adr/0005-risk-policy-representation.md):
+// packaged config, no AWS resource, not gated by PERSISTENCE_PROVIDER. No HTTP
+// endpoint yet either -- the brief's API surface has no dedicated risk-policy route;
+// this is consumed internally once classify/evaluate (Phase 7/8) exist.
+builder.Services.AddSingleton<IRiskPolicy, StaticRiskPolicy>();
 
 builder.Services.AddSingleton<ApplicationService>();
 builder.Services.AddSingleton<ApplicantService>();
