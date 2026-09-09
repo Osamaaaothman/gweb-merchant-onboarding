@@ -50,6 +50,7 @@ Be specific per area, not generic.
 | AI evaluation adapter + MCC classify (Phase 7) | Osama supplied a real Gemini API key mid-session (not Anthropic/OpenAI/Bedrock, the brief's named examples -- no vendor is mandated) with the instruction to use only free-tier models and build so the system works with or without a real key at grading time. Built `IEvaluationProvider` + `MockEvaluationProvider` (deterministic, reuses real catalog hints) + `GeminiEvaluationProvider` (real HTTP calls, schema validation, one bounded repair retry, budget-derived timeout capped at 20s -- see §5 for the empirical latency finding behind that cap). `ClassificationService` grounds every request against the real MCC catalog, drops hallucinated codes, and falls back to the mock provider (clearly labelled) if the real one fails. `POST/GET .../classify`, `POST .../classify/confirm`. Verified against the live Gemini API multiple times, including one full real request through the entire stack that correctly classified a grocery description as MCC 5411 -- see ADR-0006 | *(Osama: fill in)* |
 | Rate evaluation + risk signals (Phase 8) | Extended `IEvaluationProvider` with real multimodal statement extraction -- `GeminiEvaluationProvider` sends the actual document bytes to Gemini as an inline part, verified directly against the live API (a realistic synthetic statement extracted exactly, ~6s). `EffectiveRateCalculator` is pure/deterministic (never reads AI commentary, only 5 numeric fields); `RiskSignalDetector` computes every brief-named signal category from data already in the system (not an AI judgment call), each citing a `sourceField`. New `Gweb.Domain.Documents.IDocumentStorage.DownloadObjectAsync` (full bytes, size-capped, distinct from the existing 16-byte signature-check read). `POST /v1/applications/{id}/evaluate` (202+Processing async-fallback contract when budget is too low to attempt), `GET .../evaluation` | *(Osama: fill in)* |
 | Submission gate + normalized review payload (Phase 9) | Generated the real "list documents for an application" DynamoDB `Query` (`IDocumentRepository.ListByApplicationIdAsync`) that ADR-0003 planned since Phase 2 but no caller needed until now; `SubmissionChecker` (reuses the existing `CompletenessChecker` for applicant/business, adds required-document logic on top -- Government ID, Business Registration, Bank Evidence only, Conditional types explicitly out of scope, documented in ADR-0008); `IApplicationRepository.UpdateAsync` as a deliberate third method alongside `CreateAsync`/`GetByIdAsync` rather than retrofitting `Application` onto the `SaveAsync`/`expectedVersion=0` convention every other entity uses; `SubmissionService` orchestrating the full check-then-submit flow; `POST /v1/applications/{id}/submit` returning the normalized review payload (masked applicant/business, every document, current classification/evaluation) instead of a new aggregate GET route, since the brief's literal API surface lists only `POST /submit`. Applied the Phase 8 namespace-collision lesson proactively this time (differently-named aliases `DomainDocument`/`DomainEvaluation` from the start, not same-named ones) -- no repeat of that bug. One minor `CA1859` analyzer fix in test helpers; no behavioral bugs found this phase -- build and all 383 tests passed clean on the first run after each incremental addition | *(Osama: fill in)* |
+| Deadline hardening + bounded retry (Phase 10) | Audited every DynamoDB/S3/Gemini call site for budget propagation -- found no gaps, all already routed through a budget-derived timeout since the phase each adapter was built. Built `Gweb.Shared.Resilience.BoundedRetry` (budget-aware bounded retry, exponential backoff with full jitter, reusing the existing `DomainException.Retryable` flag as the retry-worthiness signal) and wired it into the Gemini adapter only -- deliberately not into DynamoDB/S3, since the AWS SDK already retries those internally and a second app-level retry layer on top would risk uncoordinated retry amplification rather than add safety; documented as a real architectural decision in ADR-0009, not an oversight. Added the third hanging-dependency test (S3, closing the one gap the audit found -- DynamoDB and Gemini already had one each). Also switched the default Gemini model from `gemini-3.6-flash` (20 free requests/day) to `gemini-3.5-flash-lite` (500/day, verified live against the real API before switching) after Osama reported the actual daily quota mid-session -- see ADR-0006's addendum | *(Osama: fill in)* |
 
 *(Osama: the "My involvement" column is intentionally blank — Claude should not write
 this in your voice. Fill it in with what you actually reviewed, questioned, or would
@@ -370,6 +371,44 @@ assuming "an alias always wins."
 **Fix:** Fully qualified every such reference with `global::Gweb.Domain.Evaluation.Evaluation`
 instead of relying on an alias, with a comment explaining why the alias doesn't work
 here (so a future edit doesn't "simplify" it back to a broken alias).
+
+---
+
+**Issue:** Adding retry-on-timeout to `GeminiEvaluationProvider` broke one existing
+test's *intent* without breaking its assertion. `ThrowsDependencyTimeoutExceptionWhenTheCallHangsPastItsBudget`
+still passed after wiring in `BoundedRetry` (it still eventually threw
+`DependencyTimeoutException`), but for the wrong reason: its `Budget()` helper uses a
+`FakeClock` frozen at 0, which never reflects the real wall-clock time a `CancelAfter`
+timeout actually consumes. `BoundedRetry`'s `budget.CanAttempt(...)` check saw "plenty
+of budget left" (the fake clock hadn't moved) and silently retried against the
+still-hanging handler two more times before giving up -- the test went from
+single-attempt to triple-attempt and ~3x slower without any assertion catching the
+change, because the test only checked the exception type, not the call count.
+**Why it mattered:** A test that passes for the wrong reason is worse than one that
+fails, because nothing flags that its documented intent ("this test runs in well under
+a second, not 20+") quietly stopped being true. Caught by reasoning through what
+`FakeClock`-vs-real-`CancelAfter`-timing actually implies for a newly-added retry path,
+not by the test suite itself failing.
+**What I did:** *(Osama: fill in)*
+**Fix:** Pinned that test (and two others whose `DependencyUnavailableException`
+assertions on `handler.CallCount` would have silently changed from 1 to 3) to
+`maxCallAttempts: 1`, with a comment explaining why, and added a separate
+`FakeDelay`-based test (`BoundedRetryTests.NeverAttemptsARetryOnceBackoffWouldConsumeMoreBudgetThanTheReserveAllows`)
+that correctly exercises the same budget-exhaustion scenario by wiring the fake delay
+to the same `FakeClock` the budget reads from, so simulated backoff genuinely consumes
+simulated time.
+
+**Decision, not a bug, but worth recording as a "did I just add a redundant layer"
+check:** before wiring `BoundedRetry` into `DynamoDbCallExecutor`/`S3CallExecutor` too
+(for consistency, since all three adapters share the same executor shape), stopped to
+ask whether the AWS SDK for .NET already retries transient DynamoDB/S3 failures
+internally. It does (a configurable retry policy with its own backoff, applied before
+an `AmazonDynamoDBException`/`AmazonS3Exception` ever reaches our `catch` blocks) --
+scoped the new app-level retry to Gemini only (the one adapter with no SDK and no
+built-in retry, and the one that has actually hit a real transient failure in this
+project) rather than building a second, uncoordinated retry layer on top of the SDK's
+own for the other two. Documented in ADR-0009 rather than left as an unstated
+assumption.
 
 ---
 

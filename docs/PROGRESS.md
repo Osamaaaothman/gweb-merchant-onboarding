@@ -666,3 +666,62 @@ frontend -- the granular endpoints already serve that need, and `POST /submit`'s
 response is the normalized review payload the brief asks for.
 
 Merged to `main` with `--no-ff`, pushed.
+
+---
+
+## 2026-09-09 (same day, continued) — Phase 10 (deadline hardening & bounded retry) built, verified, merged
+
+Continued on "يلا نروح ع الخطوة الي بعدها" (let's go to the next step) after Osama asked
+for an honest risk assessment against the assessment PDF's rubric and named this
+phase's items -- specifically bounded retry with backoff/jitter -- as one of the
+highest-risk gaps if left undone before the deadline.
+
+**What got built:** An audit of every DynamoDB/S3/Gemini call site for
+`DeadlineBudget` propagation -- found no gaps; every call was already routed through a
+budget-derived timeout since the phase each adapter was built (Phases 2-8). A new
+`Gweb.Shared.Resilience.BoundedRetry` (bounded retry with exponential backoff and full
+jitter, reusing the existing `DomainException.Retryable` flag as the retry-worthiness
+signal, never sleeping toward a retry the remaining budget could not afford) wired into
+`GeminiEvaluationProvider` only -- deliberately not into the DynamoDB/S3 call
+executors, since the AWS SDK for .NET already retries transient failures on those
+internally, and a second, uncoordinated app-level retry loop on top would risk retry
+amplification rather than add safety. A third hanging-dependency test
+(`S3DocumentStorageTests`), closing the one coverage gap the audit found -- DynamoDB
+and Gemini each already had one. `docs/adr/0009-deadline-hardening-and-retry.md`
+documents all of this, including why "structured timeout response + state preserved
+for safe retry" needed no new code: `HttpErrorMapper`'s existing 504/503 mapping and
+every entity's existing optimistic-concurrency conditional write already satisfy it.
+
+**Also fixed mid-phase:** Osama reported the real per-account Gemini free-tier quota --
+20 requests/day for `gemini-3.6-flash` (this project's default since Phase 7), easy to
+exhaust during grading or a live demo, versus 500/day for `gemini-3.5-flash-lite`.
+Verified both `gemini-3.5-flash-lite` and the other option he named
+(`gemini-3.1-flash-lite`) against the real API before choosing -- 3.5 Flash Lite
+returned a real 200; 3.1 Flash Lite returned a real 503 ("high demand") at the moment of
+checking. Switched the default in `AppConfig.cs`, `infra/template.yaml`,
+`.env.example`, and the local `.env` -- only the env var changed, no code change,
+exactly the mechanism `docs/adr/0006-ai-evaluation-provider.md` already anticipated the
+second time Google's free-tier lineup shifted. Documented as an addendum to ADR-0006
+rather than rewriting its original reasoning.
+
+**A real (if narrow) bug caught by reasoning, not by a test failing:** wiring retry
+into `GeminiEvaluationProvider` initially left one existing hanging-dependency test
+technically passing but no longer testing what it claimed -- its `Budget()` helper's
+`FakeClock` never advances with real wall-clock time, so `BoundedRetry`'s
+budget-remaining check saw "plenty left" and silently retried twice against the still-
+hanging handler before giving up, making the test ~3x slower and its own "runs in well
+under a second" comment quietly false. Full detail in `AI-USAGE.md` §5. Fixed by pinning
+that test (and two others whose call-count assertions would have silently changed) to
+`maxCallAttempts: 1`, and adding a dedicated `FakeDelay`-based test that correctly
+exercises retry-respects-budget by wiring the fake delay to the same `FakeClock` the
+budget reads from.
+
+**Verified for real, standard checks:** `dotnet build` (0 warnings/errors), `dotnet
+test` -- 392/392 passing (up from 383; the new hanging/retry tests add real but small
+wall-clock cost via `FakeDelay`, not the multi-second cost a naive implementation
+without fake-delay injection would have), coverage 94.49%/84.36% (flat vs. Phase 9's
+94.5%/84.4% -- no new untested surface, retry code layered onto already-covered paths).
+`sam validate -t infra/template.yaml --lint` re-confirmed valid after the `GeminiModel`
+default change.
+
+Merged to `main` with `--no-ff`, pushed.

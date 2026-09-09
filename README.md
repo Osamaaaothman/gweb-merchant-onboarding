@@ -1,6 +1,6 @@
 # GWEB Merchant Onboarding & Underwriting Intake Layer
 
-> **Status: Phase 9 — review & submit.** This README grows with
+> **Status: Phase 10 — deadline hardening & bounded retry.** This README grows with
 > every phase (see `docs/08-IMPLEMENTATION-PLAN.md`). Sections marked `(TBD)` are not
 > built yet — that is an honest gap, not a hidden one.
 
@@ -123,6 +123,17 @@ the application at `Submitted` -- still no `Approved` state anywhere in this cod
 enforced structurally by `NoAutoApprovalPathTests`. See
 [`docs/adr/0008-submission-gate.md`](docs/adr/0008-submission-gate.md).
 
+Deadline hardening (Phase 10): every DynamoDB/S3/Gemini call already routed through a
+budget-derived timeout in earlier phases -- this phase audited that end-to-end (no gaps
+found) and added `Gweb.Shared.Resilience.BoundedRetry`, a budget-aware bounded retry
+with exponential backoff and full jitter, wired into the Gemini adapter only. DynamoDB
+and S3 deliberately do **not** get a second app-level retry layer -- the AWS SDK already
+retries transient failures on those internally, and stacking an uncoordinated retry loop
+on top would risk retry amplification rather than add safety. Gemini has no SDK and no
+built-in retry, and is the one adapter that has hit a real transient failure in this
+project (a live HTTP 503 during Phase 8's manual testing). See
+[`docs/adr/0009-deadline-hardening-and-retry.md`](docs/adr/0009-deadline-hardening-and-retry.md).
+
 Full architecture document with diagram: `docs/ARCHITECTURE.md` **(TBD — Phase 13)**.
 ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runtime-and-language-choice.md),
 [`docs/adr/0002-iac-tool-choice.md`](docs/adr/0002-iac-tool-choice.md),
@@ -131,7 +142,8 @@ ADRs so far: [`docs/adr/0001-runtime-and-language-choice.md`](docs/adr/0001-runt
 [`docs/adr/0005-risk-policy-representation.md`](docs/adr/0005-risk-policy-representation.md),
 [`docs/adr/0006-ai-evaluation-provider.md`](docs/adr/0006-ai-evaluation-provider.md),
 [`docs/adr/0007-rate-evaluation-and-risk-signals.md`](docs/adr/0007-rate-evaluation-and-risk-signals.md),
-[`docs/adr/0008-submission-gate.md`](docs/adr/0008-submission-gate.md).
+[`docs/adr/0008-submission-gate.md`](docs/adr/0008-submission-gate.md),
+[`docs/adr/0009-deadline-hardening-and-retry.md`](docs/adr/0009-deadline-hardening-and-retry.md).
 
 ## Tech stack
 
@@ -553,17 +565,28 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
   actual requirement — and this was a real key Osama supplied mid-session, used per his
   explicit instruction ("use only the free models"). See ADR-0006.
 - **Free-tier Gemini rate limits/overload are real** — hit once during manual
-  verification (a genuine HTTP 503 from the live API). The system's fallback-to-mock
-  design means this degrades classification *quality* for that one request, not
-  request *success* — the caller still gets a labelled, usable result.
+  verification (a genuine HTTP 503 from the live API, back when `gemini-3.6-flash` was
+  the default). The system's fallback-to-mock design means this degrades classification
+  *quality* for that one request, not request *success* — the caller still gets a
+  labelled, usable result. Since 2026-09-09 the default model is `gemini-3.5-flash-lite`
+  (500 free requests/day vs. `gemini-3.6-flash`'s 20/day, confirmed working against the
+  live API before switching — see ADR-0006's addendum) specifically so grading/demoing
+  this system is unlikely to exhaust the quota; Phase 10 additionally added a real
+  bounded retry with backoff/jitter (`Gweb.Shared.Resilience.BoundedRetry`) so a
+  transient 503 like the one hit during Phase 7 no longer needs to fall all the way back
+  to the mock provider on the first failure — see ADR-0009.
 - **This model's real-world latency runs close to the system's 35s internal deadline
-  target** — a single classify call took as long as ~30 seconds during manual testing
-  (this model spends a large share of its output budget on hidden "thinking" tokens).
-  Defended against with a hardcoded 20-second cap on that one call
-  (`GeminiCallExecutor`) independent of remaining request budget, so a slow model
-  response can never consume the whole request — verified by a real test using a
-  hanging HTTP handler, not just asserted. If a faster model becomes available later,
-  this cap is a deliberate, revisitable ceiling, not a permanent architectural limit.
+  target** — measured against `gemini-3.6-flash`: a single classify call took as long as
+  ~30 seconds during manual testing (that model spends a large share of its output
+  budget on hidden "thinking" tokens). Defended against with a hardcoded 20-second cap
+  on that one call (`GeminiCallExecutor`) independent of remaining request budget, so a
+  slow model response can never consume the whole request — verified by a real test
+  using a hanging HTTP handler, not just asserted. This cap has not been separately
+  re-measured against `gemini-3.5-flash-lite` (the current default, switched for quota
+  headroom, not for speed) — a "Lite" model is generally the faster variant, so 20s
+  should remain a comfortable, conservative ceiling rather than a tight one, but that is
+  reasoning, not a fresh live measurement. The cap is a deliberate, revisitable value,
+  not a permanent architectural limit.
 - **`AI_API_KEY` in `infra/template.yaml` is a `NoEcho` CloudFormation parameter, not
   an SSM SecureString reference** — simpler for a project that has never executed a
   real `sam deploy`. A production setup should source it from SSM Parameter Store
@@ -616,7 +639,7 @@ and verified — see `docs/07-DELIVERY-CHECKLIST.md`.
 ## Test coverage
 
 Measured by running `dotnet test --collect:"XPlat Code Coverage" --settings
-coverlet.runsettings` (last run: 383 tests, all passing; generated-code excluded per
+coverlet.runsettings` (last run: 392 tests, all passing; generated-code excluded per
 `coverlet.runsettings`):
 
 | Assembly | Line coverage | Branch coverage |
@@ -625,21 +648,27 @@ coverlet.runsettings` (last run: 383 tests, all passing; generated-code excluded
 | `Gweb.Adapters.Storage` | 100% | 100% |
 | `Gweb.Adapters.Mcc` | 100% | 88.9% |
 | `Gweb.Adapters.RiskPolicy` | 100% | 83.3% |
-| `Gweb.Shared` | 99.35% | 95.65% |
+| `Gweb.Shared` | 98.75% | 93.75% |
 | `Gweb.Services` | 97.22% | 85.71% |
 | `Gweb.Adapters.Persistence` | 98.6% | 80.35% |
 | `Gweb.Domain` | 91.95% | 88.32% |
 | `Gweb.Api` | 92.79% | 81.42% |
-| `Gweb.Adapters.Evaluation` | 90.9% | 54.0% |
-| **Overall** | **94.5%** | **84.4%** |
+| `Gweb.Adapters.Evaluation` | 91.21% | 55.76% |
+| **Overall** | **94.49%** | **84.36%** |
 
-Up across the board this phase (94.5%/84.4% vs. Phase 8's 93.7%/83.0%) — the new
-submission-gate code (`SubmissionChecker`, `SubmissionService`, the new repository
-methods) is thoroughly covered by design (every missing-item category, every
-document-status edge case, the full real-HTTP journey through `SubmitEndpointTests`).
-`Gweb.Adapters.Evaluation`'s branch coverage stays the lowest of any assembly, unchanged
-from Phase 8 since no code in it changed this phase: `GeminiEvaluationProvider` has
-more independent failure-mode branches than the test suite exercises every pairwise
-combination of; each path *is* tested individually. Numbers re-measured and reported
-per-phase; a stale percentage from an earlier phase is never left standing in for what a
-later phase actually covers.
+Roughly flat overall this phase (94.49%/84.36% vs. Phase 9's 94.5%/84.4% — no new
+untested surface, just retry code layered onto already-covered call paths).
+`Gweb.Adapters.Evaluation` ticked up (branch coverage 54.0% → 55.76%) from the new
+retry-demonstration tests (`RetriesATransientHttpFailureAndSucceedsOnALaterAttempt`,
+`GivesUpAfterTheDefaultThreeAttemptsAgainstAPersistentFailure`) exercising branches
+`GeminiEvaluationProvider` didn't have before this phase; it stays the lowest of any
+assembly for the same reason as every prior phase: more independent failure-mode
+branches than the suite exercises every pairwise combination of, each path tested
+individually rather than combinatorially. `Gweb.Shared` dipped slightly (99.35% →
+98.75% line, 95.65% → 93.75% branch) — the new `TaskDelay` (the real, production
+`IDelay`) is deliberately never exercised by any test, since every test that cares about
+retry timing injects `FakeDelay` instead; `TaskDelay` is a one-line pass-through to
+`Task.Delay` with no branching logic to hide a bug in, so this is an accepted, honest
+gap rather than a missing test. Numbers re-measured and reported per-phase; a stale
+percentage from an earlier phase is never left standing in for what a later phase
+actually covers.

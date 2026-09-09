@@ -6,6 +6,7 @@ using Gweb.Domain.Evaluation;
 using Gweb.Shared.Clock;
 using Gweb.Shared.Deadline;
 using Gweb.Shared.Errors;
+using Gweb.Shared.Resilience;
 
 namespace Gweb.Tests.Adapters.Evaluation;
 
@@ -14,7 +15,8 @@ public class GeminiEvaluationProviderTests
     private static readonly BusinessProfileInput Profile = new("Fresh Valley Grocers", "A neighborhood grocery store.", null, null);
     private static readonly List<McCandidateSeed> Hints = [new("5411", "Grocery Stores, Supermarkets")];
 
-    private static DeadlineBudget Budget(long remainingMs = 35_000) => DeadlineBudget.Start(remainingMs, new FakeClock(0), targetMs: 35_000);
+    private static DeadlineBudget Budget(long remainingMs = 35_000, FakeClock? clock = null) =>
+        DeadlineBudget.Start(remainingMs, clock ?? new FakeClock(0), targetMs: 35_000);
 
     private sealed class FakeHttpMessageHandler(Func<HttpRequestMessage, int, HttpResponseMessage> respond) : HttpMessageHandler
     {
@@ -106,9 +108,12 @@ public class GeminiEvaluationProviderTests
     [Fact]
     public async Task ThrowsImmediatelyOnANonSuccessStatusCodeWithoutRetrying()
     {
+        // maxCallAttempts: 1 -- this test is specifically about the exception
+        // translation for a single attempt, decoupled from Phase 10's retry policy.
+        // Retry-on-transient-failure behavior gets its own dedicated tests below.
         var handler = new FakeHttpMessageHandler((_, _) =>
             new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("boom") });
-        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model");
+        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model", maxCallAttempts: 1);
 
         await Assert.ThrowsAsync<DependencyUnavailableException>(() => provider.ClassifyMccAsync(Profile, Hints, Budget()));
         Assert.Equal(1, handler.CallCount);
@@ -117,10 +122,11 @@ public class GeminiEvaluationProviderTests
     [Fact]
     public async Task ThrowsImmediatelyWhenTheResponseBodyExceedsTheSizeLimit()
     {
+        // maxCallAttempts: 1 -- see the comment on the previous test.
         var oversized = new string('x', 25_000);
         var handler = new FakeHttpMessageHandler((_, _) =>
             new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(oversized) });
-        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model");
+        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model", maxCallAttempts: 1);
 
         await Assert.ThrowsAsync<DependencyUnavailableException>(() => provider.ClassifyMccAsync(Profile, Hints, Budget()));
         Assert.Equal(1, handler.CallCount);
@@ -129,14 +135,51 @@ public class GeminiEvaluationProviderTests
     [Fact]
     public async Task ThrowsDependencyTimeoutExceptionWhenTheCallHangsPastItsBudget()
     {
+        // maxCallAttempts: 1 -- this Budget() uses a FakeClock frozen at 0, so it
+        // never reflects the real wall-clock time a CancelAfter timeout actually
+        // consumes; without pinning to a single attempt here, BoundedRetry would see
+        // "plenty of budget left" and retry against the still-hanging handler. A
+        // dedicated FakeClock+FakeDelay test below covers retry-respects-budget
+        // correctly, where both the timeout and the backoff advance the same clock.
         var hangingCall = new TaskCompletionSource<HttpResponseMessage>();
         var handler = new HangingHttpMessageHandler(hangingCall);
-        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model");
+        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model", maxCallAttempts: 1);
         // remaining 3050ms - GeminiCallExecutor's 3000ms reserve = a 50ms real-time
         // timeout, so this test runs in well under a second, not 20+.
         var budget = Budget(remainingMs: 3_050);
 
         await Assert.ThrowsAsync<DependencyTimeoutException>(() => provider.ClassifyMccAsync(Profile, Hints, budget));
+    }
+
+    [Fact]
+    public async Task RetriesATransientHttpFailureAndSucceedsOnALaterAttempt()
+    {
+        var clock = new FakeClock(0);
+        var delay = new FakeDelay(clock);
+        var handler = new FakeHttpMessageHandler((_, count) => count < 3
+            ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("overloaded") }
+            : GeminiEnvelope(ValidCandidateJson()));
+        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model", delay);
+
+        var result = await provider.ClassifyMccAsync(Profile, Hints, Budget(clock: clock));
+
+        Assert.Equal("5411", result.Candidates[0].MccCode);
+        Assert.Equal(3, handler.CallCount);
+        Assert.Equal(2, delay.RequestedDelaysMs.Count);
+    }
+
+    [Fact]
+    public async Task GivesUpAfterTheDefaultThreeAttemptsAgainstAPersistentFailure()
+    {
+        var clock = new FakeClock(0);
+        var delay = new FakeDelay(clock);
+        var handler = new FakeHttpMessageHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("overloaded") });
+        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model", delay);
+
+        await Assert.ThrowsAsync<DependencyUnavailableException>(() => provider.ClassifyMccAsync(Profile, Hints, Budget(clock: clock)));
+
+        Assert.Equal(3, handler.CallCount);
     }
 
     [Fact]

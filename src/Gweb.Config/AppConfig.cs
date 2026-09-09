@@ -34,11 +34,14 @@ public static class AppConfigLoader
             PresignTtlSeconds: (int)ParsePositiveLong(getEnv("PRESIGN_TTL_SECONDS"), 300, "PRESIGN_TTL_SECONDS"),
             AiProvider: ParseEnum(getEnv("AI_PROVIDER"), AiProvider.Mock, "AI_PROVIDER"),
             AiApiKey: getEnv("AI_API_KEY"),
-            // gemini-3.6-flash confirmed working against the real API during this
-            // phase's build (see docs/adr/0006-ai-evaluation-provider.md) -- an env
-            // var, not a hardcoded model string, because Google's free-tier model
-            // lineup has already moved once during this session and will again.
-            GeminiModel: getEnv("GEMINI_MODEL") is { Length: > 0 } model ? model : "gemini-3.6-flash",
+            // gemini-3.5-flash-lite confirmed working against the real API (see
+            // docs/adr/0006-ai-evaluation-provider.md) -- an env var, not a hardcoded
+            // model string, because Google's free-tier model lineup has already moved
+            // twice during this project and will again. Chosen over gemini-3.6-flash
+            // (this project's original default) because the free tier only allows 20
+            // requests/day for 3.6 Flash vs. 500/day for 3.5 Flash Lite -- easy to
+            // exhaust the former during grading/demoing.
+            GeminiModel: getEnv("GEMINI_MODEL") is { Length: > 0 } model ? model : "gemini-3.5-flash-lite",
             LogLevel: ParseEnum(getEnv("LOG_LEVEL"), LogLevel.Info, "LOG_LEVEL"));
     }
 

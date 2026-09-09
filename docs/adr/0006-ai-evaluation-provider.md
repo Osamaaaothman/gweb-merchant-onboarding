@@ -191,3 +191,22 @@ paths without any real network call.
   below what this model can sometimes take -- if a future, faster model becomes
   available on this account, this cap should be revisited rather than left as a
   historical artifact of one slow model generation.
+
+## Addendum (2026-09-09): switched default model to gemini-3.5-flash-lite
+
+Exactly the scenario the second Consequences bullet above anticipated, playing out a
+second time: Osama reported this account's actual free-tier daily request quota is
+20/day for `gemini-3.6-flash` (the model this ADR originally chose after the
+`gemini-2.5-flash` 404 discovery above), easy to exhaust during grading or a live demo,
+versus 500/day for `gemini-3.5-flash-lite`. Verified live against the real API
+(`generateContent` with a trivial prompt) before switching -- `gemini-3.5-flash-lite`
+returned a real 200 response; `gemini-3.1-flash-lite`, the other option mentioned,
+returned a real 503 ("high demand") at the moment of checking, so `gemini-3.5-flash-lite`
+was chosen as the confirmed-working, confirmed-higher-quota option, not a guess between
+two unverified names. Only `GEMINI_MODEL`'s default changed (`AppConfig.cs`,
+`infra/template.yaml`, `.env.example`, the local `.env`) -- no code change, exactly the
+env-var-driven mechanism this ADR's Consequences section already called out. A "Lite"
+model is also arguably a better fit than the original choice for this codebase's actual
+usage: every Gemini call here is a short, JSON-schema-constrained classification or
+extraction request, not open-ended generation, so a lighter/faster model variant is not
+a quality tradeoff for this workload the way it might be for a different task.
