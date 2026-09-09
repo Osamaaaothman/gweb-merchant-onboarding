@@ -153,11 +153,13 @@ Resources:
         Variables:
           APPLICATIONS_TABLE_NAME: !Ref ApplicationsTable
           DOCUMENTS_BUCKET_NAME: !Ref DocumentsBucket
-      # Scoped to exactly PutItem/GetItem on this one table -- never dynamodb:*, never
-      # Resource: "*". Covers Application, Applicant, Business, and Document items
-      # alike (all four repositories use only these two operations); extend this list
-      # (never widen it to a wildcard) when a later phase adds Query (e.g. listing
-      # documents) or UpdateItem.
+      # Scoped to exactly PutItem/GetItem/Query on this one table -- never dynamodb:*,
+      # never Resource: "*". Covers every repository's actual usage: PutItem/GetItem
+      # for every entity's create/update/read, plus Query (added Phase 9) for
+      # IDocumentRepository.ListByApplicationIdAsync -- the "list documents for an
+      # application" access pattern docs/adr/0003-dynamodb-table-strategy.md planned
+      # from Phase 2 but no caller needed until the Phase 9 submission gate. Extend
+      # this list (never widen it to a wildcard) if a future phase adds UpdateItem.
       #
       # S3 is scoped the same way, to object actions under this one bucket only.
       # s3:PutObject is granted even though the Lambda itself never uploads a byte --
@@ -172,6 +174,7 @@ Resources:
               Action:
                 - dynamodb:PutItem
                 - dynamodb:GetItem
+                - dynamodb:Query
               Resource: !GetAtt ApplicationsTable.Arn
             - Effect: Allow
               Action:
