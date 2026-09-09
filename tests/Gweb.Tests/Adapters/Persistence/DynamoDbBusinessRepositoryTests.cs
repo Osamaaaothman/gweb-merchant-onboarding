@@ -76,6 +76,50 @@ public class DynamoDbBusinessRepositoryTests
     }
 
     [Fact]
+    public async Task SaveRoundTripsCorrectlyWhenEntityTypeHasNeverBeenSet()
+    {
+        // Regression test for a real bug found via manual testing against real
+        // DynamoDB Local (Osama): every prior test/manual run happened to always set
+        // EntityType (the frontend's dropdown always defaults to Llc), which hid a
+        // genuine collision between this repository's internal "entityType" record-type
+        // marker attribute and the domain's own EntityType field sharing the exact
+        // same DynamoDB attribute key -- an unset EntityType left "entityType" holding
+        // the leftover marker string "BUSINESS", and GetOptionalEnum<EntityType> then
+        // threw ArgumentException("Requested value 'BUSINESS' was not found.") trying
+        // to parse it as a real enum value. Only reproducible through the real
+        // DynamoDB attribute-mapping code path (InMemoryBusinessRepository holds the
+        // Business object directly, no serialize/deserialize round-trip), which is
+        // exactly why this didn't surface in the automated suite until now.
+        var fakeTable = new Dictionary<string, Dictionary<string, AttributeValue>>();
+        var mockClient = new Mock<IAmazonDynamoDB>();
+        mockClient
+            .Setup(c => c.PutItemAsync(It.IsAny<PutItemRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((PutItemRequest r, CancellationToken _) =>
+            {
+                fakeTable[r.Item["pk"].S + "|" + r.Item["sk"].S] = r.Item;
+                return new PutItemResponse();
+            });
+        mockClient
+            .Setup(c => c.GetItemAsync(It.IsAny<GetItemRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((GetItemRequest r, CancellationToken _) =>
+            {
+                var key = r.Key["pk"].S + "|" + r.Key["sk"].S;
+                return fakeTable.TryGetValue(key, out var item) ? new GetItemResponse { Item = item } : new GetItemResponse { Item = null };
+            });
+        var repository = new DynamoDbBusinessRepository(mockClient.Object, TableName);
+
+        var business = Business.CreateEmpty(Guid.NewGuid(), DateTimeOffset.UtcNow, "actor", "corr-1");
+        business.ApplyUpdate(new BusinessUpdate(LegalBusinessName: "Testerson Trading LLC"), DateTimeOffset.UtcNow);
+
+        await repository.SaveAsync(business, expectedVersion: 0, Budget());
+        var result = await repository.GetByApplicationIdAsync(business.ApplicationId, Budget());
+
+        Assert.NotNull(result);
+        Assert.Equal("Testerson Trading LLC", result!.LegalBusinessName);
+        Assert.Null(result.EntityType);
+    }
+
+    [Fact]
     public async Task GetReturnsNullWhenNoItemExists()
     {
         var mockClient = new Mock<IAmazonDynamoDB>();
