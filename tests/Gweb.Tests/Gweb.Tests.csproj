@@ -26,6 +26,7 @@
     <ProjectReference Include="..\..\src\Gweb.Adapters.Persistence\Gweb.Adapters.Persistence.csproj" />
     <ProjectReference Include="..\..\src\Gweb.Services\Gweb.Services.csproj" />
     <ProjectReference Include="..\..\src\Gweb.Adapters.Storage\Gweb.Adapters.Storage.csproj" />
+    <ProjectReference Include="..\..\src\Gweb.Adapters.Mcc\Gweb.Adapters.Mcc.csproj" />
   </ItemGroup>
 
 </Project>
