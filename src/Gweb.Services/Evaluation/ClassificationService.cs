@@ -33,6 +33,19 @@ public sealed class ClassificationService(
     private const int HitsPerKeyword = 5;
     private const int MinKeywordLength = 4;
 
+    /// <summary>
+    /// Confidence ceiling applied when BuildCatalogHints found no genuine keyword
+    /// match and fell back to the catalog's browsing default -- without this, a
+    /// provider (mock or real) has no way to know the "candidates" it was handed are
+    /// an arbitrary browse list, not a relevance-ranked set, and confidently proposes
+    /// one of them anyway (found for real: "a gym serve athelates" -- no catalog word
+    /// long enough to match anything -- produced "0742 Veterinary Services" at 90%
+    /// confidence). Capping here, not inside either provider, keeps this the one
+    /// place that owns it, matching how the primary/fallback-provider decision
+    /// already works in this class.
+    /// </summary>
+    private const decimal NoKeywordMatchConfidenceCeiling = 0.35m;
+
     public async Task<McClassification> ClassifyAsync(
         Guid applicationId, string correlationId, DeadlineBudget budget, CancellationToken cancellationToken = default)
     {
@@ -40,13 +53,18 @@ public sealed class ClassificationService(
             ?? throw new ValidationException("Business must be filled in before classification.");
 
         var profile = new BusinessProfileInput(business.LegalBusinessName, business.BusinessDescription, business.WebsiteUrl, business.EntityType);
-        var hints = BuildCatalogHints(business.BusinessDescription);
+        var (hints, isGenuineMatch) = BuildCatalogHints(business.BusinessDescription);
 
         var suggestion = await GetSuggestionWithFallbackAsync(profile, hints, budget, cancellationToken).ConfigureAwait(false);
 
         var validCandidates = suggestion.Candidates
             .Where(c => catalog.GetByCode(c.MccCode) is not null)
             .Where(c => c.Confidence is >= 0m and <= 1m)
+            .Select(c => isGenuineMatch ? c : c with
+            {
+                Confidence = Math.Min(c.Confidence, NoKeywordMatchConfidenceCeiling),
+                Explanation = "No confident keyword match was found in the MCC catalog for this business description -- showing a general category for manual review, not a genuine match.",
+            })
             .OrderByDescending(c => c.Confidence)
             .ToList();
 
@@ -104,11 +122,11 @@ public sealed class ClassificationService(
     /// word and unioning the results, falling back to the catalog's own browsing
     /// default only if every keyword search comes up empty.
     /// </summary>
-    private List<McCandidateSeed> BuildCatalogHints(string? businessDescription)
+    private (List<McCandidateSeed> Hints, bool IsGenuineMatch) BuildCatalogHints(string? businessDescription)
     {
         if (string.IsNullOrWhiteSpace(businessDescription))
         {
-            return ToHints(catalog.Search(null, CatalogHintCount));
+            return (ToHints(catalog.Search(null, CatalogHintCount)), false);
         }
 
         var keywords = businessDescription
@@ -126,7 +144,9 @@ public sealed class ClassificationService(
             }
         }
 
-        return matches.Count > 0 ? ToHints(matches.Values.Take(CatalogHintCount)) : ToHints(catalog.Search(null, CatalogHintCount));
+        return matches.Count > 0
+            ? (ToHints(matches.Values.Take(CatalogHintCount)), true)
+            : (ToHints(catalog.Search(null, CatalogHintCount)), false);
     }
 
     private static List<McCandidateSeed> ToHints(IEnumerable<MccCode> codes) =>

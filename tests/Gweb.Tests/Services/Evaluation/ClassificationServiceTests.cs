@@ -136,6 +136,48 @@ public class ClassificationServiceTests
     }
 
     [Fact]
+    public async Task ClassifyCapsConfidenceAndReplacesTheExplanationWhenNoKeywordGenuinelyMatched()
+    {
+        // Regression test for a real bug found via manual testing (Osama): "a gym
+        // serve athelates" has no word >=4 chars that matches anything in the real
+        // catalog ("gym" is 3 chars, "athelates" is a typo for "athletes" and neither
+        // spelling appears in any catalog description) -- BuildCatalogHints silently
+        // fell back to the browsing default (an arbitrary, irrelevant 25-code list),
+        // and the provider confidently proposed "0742 Veterinary Services" at 90%
+        // confidence as if it were a genuine match. A provider has no way to know the
+        // hints it was handed are an arbitrary browse list rather than a
+        // relevance-ranked set, so it must be capped here regardless of what
+        // confidence the provider itself claims.
+        var (applicationId, businesses) = await SeedBusinessAsync("a gym serve athelates");
+        var primary = new FakeEvaluationProvider(() =>
+            new McSuggestion("mock", [new McClassificationCandidate("0742", 0.9m, "Mock match: business profile keywords align with catalog entry \"Veterinary Services\".")]));
+        var service = new ClassificationService(
+            new InMemoryMcClassificationRepository(), businesses, new StaticMccCatalog(), primary, primary,
+            new FakeClock(0), Logger());
+
+        var result = await service.ClassifyAsync(applicationId, "corr-1", Budget());
+
+        Assert.True(result.Candidates[0].Confidence <= 0.35m);
+        Assert.Contains("No confident keyword match", result.Candidates[0].Explanation);
+        Assert.DoesNotContain("Veterinary", result.Candidates[0].Explanation);
+    }
+
+    [Fact]
+    public async Task ClassifyDoesNotCapConfidenceWhenAKeywordGenuinelyMatched()
+    {
+        var (applicationId, businesses) = await SeedBusinessAsync();
+        var primary = new FakeEvaluationProvider(() => new McSuggestion("mock", [new McClassificationCandidate("5411", 0.9m, "genuine match")]));
+        var service = new ClassificationService(
+            new InMemoryMcClassificationRepository(), businesses, new StaticMccCatalog(), primary, primary,
+            new FakeClock(0), Logger());
+
+        var result = await service.ClassifyAsync(applicationId, "corr-1", Budget());
+
+        Assert.Equal(0.9m, result.Candidates[0].Confidence);
+        Assert.Equal("genuine match", result.Candidates[0].Explanation);
+    }
+
+    [Fact]
     public async Task ClassifyThrowsWhenEveryCandidateFromTheProviderIsInvalid()
     {
         var (applicationId, businesses) = await SeedBusinessAsync();
