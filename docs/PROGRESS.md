@@ -178,3 +178,84 @@ model from the brief §3.1/§3.2, schema validation (accept + reject cases), `PA
 percentage rules, masking of government ID/tax ID/bank metadata at capture, and the
 completeness calculation. This is where `Person`/`Business` domain entities (deferred
 from Phase 2 on purpose) actually get built, once their real fields are known.
+
+---
+
+## 2026-09-09 (same day, later still) — Phase 3: applicant & business intake
+
+`git push` happened this session (all of Phases 0–2 are on `origin/main` now, not just
+local). Osama gave a blanket "continue, and don't leave anything incomplete" — worth
+being clear in this log that "incomplete" was interpreted as "each phase I actually
+build is real and verified," not "the whole 16-phase plan finishes in one session."
+
+### What landed
+
+- `Applicant`/`Business` domain entities, full field set from brief §3.1/§3.2, PATCH
+  (partial-update) semantics: every field optional, all provided fields validated
+  together (errors collected, not fail-fast), either the whole batch applies or none
+  of it does.
+- Masking at capture for government ID, EIN/UBI, and bank account numbers -- the full
+  value is extracted to last-4 and discarded in the same conversion call that
+  constructs the domain value object; it's never stored, logged, or returned.
+- `OwnershipValidator`: cross-entity check (applicant's own percentage + all
+  beneficial owners' percentages ≤ 100%) -- lives in Domain as a pure function since
+  neither entity alone has both sides of the data.
+- `CompletenessChecker`: what's still missing per section, reused later by Phase 9's
+  submission gate so the review screen and the actual submit block can't disagree.
+- `DynamoDbApplicantRepository`/`DynamoDbBusinessRepository` + in-memory equivalents,
+  same optimistic-concurrency convention as Phase 2's `Application` repository.
+  Extracted the shared timeout/error-wrapping code (`DynamoDbCallExecutor`) and
+  optional-field mapping helpers (`DynamoDbItemMapping`) rather than tripling them.
+- `PATCH /v1/applications/{id}/applicant` and `.../business`; `GET
+  /v1/applications/{id}` now returns the full aggregate (applicant, business,
+  completeness), not just the envelope.
+- The required Phase 3 security test: PATCHing a fully populated applicant + business
+  through the real HTTP pipeline while capturing stdout, asserting no raw sensitive
+  value ever appears in a log line.
+- 152 tests passing (up from 78), 92.2% line / 84.8% branch coverage.
+
+### Four real bugs found by actually running tests, not by inspection
+
+1. `DynamoDbApplicationRepository`'s broad exception catch swallowed
+   `ConditionalCheckFailedException` before the caller's specific handler saw it.
+2. A test's wrong assumption about AWSSDK v4's `GetItemResponse.IsItemSet` semantics
+   for a missing item (production code was already correct; the test fixture wasn't).
+3. **(new this phase)** The in-memory repositories stored/returned live object
+   references on both save and get. Since `Applicant`/`Business` are mutable, a
+   caller mutating an object it just saved or just loaded (exactly what
+   `ApplicantService.UpdateApplicantAsync` does on every call) silently corrupted the
+   "persisted" state before the optimistic-concurrency check ran. Fixed with a
+   `Snapshot()` method on each entity, used on both the read and write side of all
+   three in-memory repositories. Two regression tests added.
+4. **(new this phase)** Enum fields ("Llc", "Passport") failed to (de)serialize over
+   HTTP -- `System.Text.Json` defaults to numeric enum values. Fixed with a
+   `JsonStringEnumConverter` registered globally via `ConfigureHttpJsonOptions`.
+
+Full detail on all of these, including the "why it mattered" questions for Osama to
+answer, is in `AI-USAGE.md` §5.
+
+### Blocked on Osama
+
+1. AWS account/region/profile/billing limit, AI provider credential, GitHub repo
+   visibility, time budget — still open, unchanged from Phase 0–1.
+2. Comprehension check for Phases 0–3 — still deferred at Osama's explicit choice.
+   Now covers meaningfully more surface area (the full applicant/business validation
+   logic, the masking-at-capture pattern, the ownership cross-check) than when this
+   was first deferred.
+3. Whether the `sam local --env-vars` limitation (flagged end of Phase 2) is worth
+   root-causing — unchanged, still open.
+4. **New:** Docker's Windows service needed re-approval again mid-session (it isn't
+   persistent across whatever caused it to stop since Phase 2). Phase 3's DynamoDB
+   repositories were consequently not verified against a live DynamoDB Local --
+   README says exactly what was and wasn't verified instead.
+
+### What the next session should start with
+
+Phase 4 — Documents & S3 (`feat/document-upload`): document metadata model + lifecycle
+state machine (`REQUESTED -> UPLOADING -> RECEIVED -> PROCESSING -> ACCEPTED |
+NEEDS_REVIEW | REJECTED`), `IDocumentStorage` + S3 + in-memory implementations,
+`POST /v1/applications/{id}/documents/presign` (pre-signed PUT, pinned content-type,
+size cap, non-guessable key) and `.../documents/{documentId}/complete` (checksum
+verification, idempotent, magic-byte check). This is the first phase touching S3, so
+worth budgeting time for the presigned-URL IAM policy and the file-signature
+validation specifically -- both are explicitly graded (docs/04-SECURITY-RULES.md §3).
