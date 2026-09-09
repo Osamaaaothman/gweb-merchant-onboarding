@@ -129,10 +129,11 @@ Resources:
       Environment:
         Variables:
           APPLICATIONS_TABLE_NAME: !Ref ApplicationsTable
-      # Scoped to exactly the two operations Phase 2 uses (create + load an
-      # application), on this table only -- never dynamodb:*, never Resource: "*".
-      # Extend this list (never widen it to a wildcard) as later phases add
-      # Query/UpdateItem for people/documents/evaluation items.
+      # Scoped to exactly PutItem/GetItem on this one table -- never dynamodb:*, never
+      # Resource: "*". Covers Application, Applicant, and Business items alike (all
+      # three repositories use only these two operations); extend this list (never
+      # widen it to a wildcard) when a later phase adds Query (e.g. listing documents)
+      # or UpdateItem.
       Policies:
         - Statement:
             - Effect: Allow
