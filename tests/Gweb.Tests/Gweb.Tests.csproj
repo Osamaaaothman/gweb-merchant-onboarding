@@ -28,6 +28,7 @@
     <ProjectReference Include="..\..\src\Gweb.Adapters.Storage\Gweb.Adapters.Storage.csproj" />
     <ProjectReference Include="..\..\src\Gweb.Adapters.Mcc\Gweb.Adapters.Mcc.csproj" />
     <ProjectReference Include="..\..\src\Gweb.Adapters.RiskPolicy\Gweb.Adapters.RiskPolicy.csproj" />
+    <ProjectReference Include="..\..\src\Gweb.Adapters.Evaluation\Gweb.Adapters.Evaluation.csproj" />
   </ItemGroup>
 
 </Project>

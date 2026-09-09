@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Amazon.DynamoDBv2;
 using Amazon.S3;
+using Gweb.Adapters.Evaluation;
 using Gweb.Adapters.Mcc;
 using Gweb.Adapters.Persistence;
 using Gweb.Adapters.RiskPolicy;
@@ -8,14 +9,17 @@ using Gweb.Adapters.Storage;
 using Gweb.Api;
 using Gweb.Api.Applications;
 using Gweb.Api.Documents;
+using Gweb.Api.Evaluation;
 using Gweb.Api.Mcc;
 using Gweb.Config;
 using Gweb.Domain.Applications;
 using Gweb.Domain.Documents;
+using Gweb.Domain.Evaluation;
 using Gweb.Domain.Mcc;
 using Gweb.Domain.RiskPolicy;
 using Gweb.Services.Applications;
 using Gweb.Services.Documents;
+using Gweb.Services.Evaluation;
 using Gweb.Services.Mcc;
 using Gweb.Shared.Clock;
 using Gweb.Shared.Logging;
@@ -53,6 +57,7 @@ if (string.Equals(persistenceProvider, "inmemory", StringComparison.OrdinalIgnor
     builder.Services.AddSingleton<IBusinessRepository, InMemoryBusinessRepository>();
     builder.Services.AddSingleton<IDocumentRepository, InMemoryDocumentRepository>();
     builder.Services.AddSingleton<IDocumentStorage, InMemoryDocumentStorage>();
+    builder.Services.AddSingleton<IMcClassificationRepository, InMemoryMcClassificationRepository>();
 }
 else
 {
@@ -75,6 +80,8 @@ else
         sp => new DynamoDbBusinessRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
     builder.Services.AddSingleton<IDocumentRepository>(
         sp => new DynamoDbDocumentRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
+    builder.Services.AddSingleton<IMcClassificationRepository>(
+        sp => new DynamoDbMcClassificationRepository(sp.GetRequiredService<IAmazonDynamoDB>(), applicationsTableName));
 
     var documentsBucketName = AppConfigLoader.RequireEnv("DOCUMENTS_BUCKET_NAME", Environment.GetEnvironmentVariable);
     // S3_SERVICE_URL mirrors DYNAMODB_SERVICE_URL -- unset in every deployed
@@ -103,6 +110,42 @@ builder.Services.AddSingleton<McCatalogService>();
 // this is consumed internally once classify/evaluate (Phase 7/8) exist.
 builder.Services.AddSingleton<IRiskPolicy, StaticRiskPolicy>();
 
+// MockEvaluationProvider is always registered as a concrete singleton, regardless of
+// AI_PROVIDER -- ClassificationService uses it as the guaranteed-available fallback
+// when the real provider fails (see docs/adr/0006-ai-evaluation-provider.md).
+builder.Services.AddSingleton<MockEvaluationProvider>();
+
+if (config.AiProvider == AiProvider.Gemini)
+{
+    var geminiApiKey = AppConfigLoader.RequireEnv("AI_API_KEY", Environment.GetEnvironmentVariable);
+    // A named (not typed) HttpClient -- GeminiEvaluationProvider's constructor also
+    // needs the API key and model name, which aren't DI-resolvable types, so it's
+    // constructed explicitly below rather than left to AddHttpClient<T>'s own
+    // constructor injection.
+    builder.Services.AddHttpClient(nameof(GeminiEvaluationProvider), client =>
+    {
+        client.BaseAddress = new Uri("https://generativelanguage.googleapis.com");
+    });
+    builder.Services.AddSingleton<IEvaluationProvider>(sp =>
+    {
+        var httpClient = sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(GeminiEvaluationProvider));
+        return new GeminiEvaluationProvider(httpClient, geminiApiKey, config.GeminiModel);
+    });
+}
+else
+{
+    builder.Services.AddSingleton<IEvaluationProvider>(sp => sp.GetRequiredService<MockEvaluationProvider>());
+}
+
+builder.Services.AddSingleton(sp => new ClassificationService(
+    sp.GetRequiredService<IMcClassificationRepository>(),
+    sp.GetRequiredService<IBusinessRepository>(),
+    sp.GetRequiredService<IMccCatalog>(),
+    sp.GetRequiredService<IEvaluationProvider>(),
+    sp.GetRequiredService<MockEvaluationProvider>(),
+    sp.GetRequiredService<IClock>(),
+    sp.GetRequiredService<StructuredLogger>()));
+
 builder.Services.AddSingleton<ApplicationService>();
 builder.Services.AddSingleton<ApplicantService>();
 builder.Services.AddSingleton<BusinessService>();
@@ -118,6 +161,7 @@ app.MapGet("/v1/health", HealthEndpoint.GetHealthAsync);
 app.MapApplicationEndpoints();
 app.MapDocumentEndpoints();
 app.MapMcEndpoints();
+app.MapClassificationEndpoints();
 
 app.Run();
 
