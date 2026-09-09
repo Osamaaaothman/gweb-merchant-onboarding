@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using Gweb.Domain.Evaluation;
 using Gweb.Shared.Deadline;
 using Gweb.Shared.Errors;
+using Gweb.Shared.Resilience;
 
 namespace Gweb.Adapters.Evaluation;
 
@@ -29,11 +30,20 @@ namespace Gweb.Adapters.Evaluation;
 /// - The API key travels as the `x-goog-api-key` header, not a `?key=` query
 ///   parameter -- verified both forms work against the real API, header chosen so the
 ///   key never appears in a URL that some logging middleware might capture.
+/// - "bounded retry with backoff + jitter, budget-aware" (Phase 10) -- every call
+///   routed through <see cref="CallOnceAsync"/> is wrapped in <see cref="BoundedRetry"/>,
+///   which only retries a Retryable DomainException (a transient timeout/unavailable
+///   failure) and never past what the remaining budget can afford. This is deliberately
+///   the one adapter that gets an app-level retry layer -- see docs/adr/0009-deadline-
+///   hardening-and-retry.md for why DynamoDB/S3 rely on the AWS SDK's own built-in
+///   retry policy instead of a second, redundant one stacked on top of it here.
 /// </summary>
-public sealed class GeminiEvaluationProvider(HttpClient httpClient, string apiKey, string model) : IEvaluationProvider
+public sealed class GeminiEvaluationProvider(
+    HttpClient httpClient, string apiKey, string model, IDelay? delay = null, int maxCallAttempts = 3) : IEvaluationProvider
 {
     private const int MaxCandidates = 5;
     private const int MaxResponseBodyChars = 20_000;
+    private readonly IDelay _delay = delay ?? new TaskDelay();
 
     // Empirically, this model spends a large share of its output-token budget on
     // hidden "thinking" tokens before producing visible text (confirmed via the raw
@@ -162,35 +172,40 @@ public sealed class GeminiEvaluationProvider(HttpClient httpClient, string apiKe
 
     private Task<string> CallOnceAsync(
         string prompt, DeadlineBudget budget, CancellationToken cancellationToken, GeminiInlineData? inlineData = null) =>
-        GeminiCallExecutor.ExecuteAsync(async ct =>
-        {
-            var parts = inlineData is null
-                ? (IReadOnlyList<GeminiPart>)[new GeminiPart(Text: prompt)]
-                : [new GeminiPart(Text: prompt), new GeminiPart(InlineData: inlineData)];
-            var requestBody = new GeminiRequest(
-                [new GeminiContent(parts)],
-                new GeminiGenerationConfig("application/json", MaxOutputTokens));
-
-            using var request = new HttpRequestMessage(HttpMethod.Post, $"/v1beta/models/{model}:generateContent")
+        BoundedRetry.ExecuteAsync(
+            () => GeminiCallExecutor.ExecuteAsync(async ct =>
             {
-                Content = JsonContent.Create(requestBody, options: RequestJsonOptions),
-            };
-            request.Headers.Add("x-goog-api-key", apiKey);
+                var parts = inlineData is null
+                    ? (IReadOnlyList<GeminiPart>)[new GeminiPart(Text: prompt)]
+                    : [new GeminiPart(Text: prompt), new GeminiPart(InlineData: inlineData)];
+                var requestBody = new GeminiRequest(
+                    [new GeminiContent(parts)],
+                    new GeminiGenerationConfig("application/json", MaxOutputTokens));
 
-            using var response = await httpClient.SendAsync(request, ct).ConfigureAwait(false);
-            var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                using var request = new HttpRequestMessage(HttpMethod.Post, $"/v1beta/models/{model}:generateContent")
+                {
+                    Content = JsonContent.Create(requestBody, options: RequestJsonOptions),
+                };
+                request.Headers.Add("x-goog-api-key", apiKey);
 
-            if (body.Length > MaxResponseBodyChars)
-            {
-                throw new DependencyUnavailableException("Gemini response exceeded the maximum allowed size.");
-            }
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new DependencyUnavailableException($"Gemini returned HTTP {(int)response.StatusCode}.");
-            }
+                using var response = await httpClient.SendAsync(request, ct).ConfigureAwait(false);
+                var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
 
-            return ExtractText(body);
-        }, budget, cancellationToken);
+                if (body.Length > MaxResponseBodyChars)
+                {
+                    throw new DependencyUnavailableException("Gemini response exceeded the maximum allowed size.");
+                }
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new DependencyUnavailableException($"Gemini returned HTTP {(int)response.StatusCode}.");
+                }
+
+                return ExtractText(body);
+            }, budget, cancellationToken),
+            budget,
+            _delay,
+            cancellationToken,
+            maxCallAttempts);
 
     private static string ExtractText(string responseBody)
     {
