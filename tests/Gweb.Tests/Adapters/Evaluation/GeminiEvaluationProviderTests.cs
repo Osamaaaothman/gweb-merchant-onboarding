@@ -167,6 +167,85 @@ public class GeminiEvaluationProviderTests
         Assert.Equal("super-secret-key", capturedRequest.Headers.GetValues("x-goog-api-key").Single());
     }
 
+    private static string ValidExtractionJson() => JsonSerializer.Serialize(new
+    {
+        processor = "Acme Processing",
+        monthlyVolume = 50_000m,
+        discountRatePercent = 2.6m,
+        perTransactionFee = 0.10m,
+        monthlyFee = 25m,
+        chargebackFeeTotal = 15m,
+        statementPeriod = "2026-08",
+        commentary = "looks normal",
+    });
+
+    [Fact]
+    public async Task ExtractStatementSendsTheDocumentBytesAsAnInlineDataPartAlongsideTheTextPrompt()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        string? capturedBody = null;
+        var handler = new FakeHttpMessageHandler((request, _) =>
+        {
+            capturedRequest = request;
+            return GeminiEnvelope(ValidExtractionJson());
+        });
+        // Capture the body before the handler's own reader consumes it.
+        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model");
+        var documentBytes = "%PDF-1.7 fake statement contents"u8.ToArray();
+
+        var result = await provider.ExtractStatementAsync(documentBytes, "application/pdf", Budget());
+
+        Assert.Equal("gemini", result.Provider);
+        Assert.Equal(50_000m, result.MonthlyVolume);
+        Assert.Equal(2.6m, result.DiscountRatePercent);
+        Assert.NotNull(capturedRequest);
+        capturedBody = handler.RequestBodies[0];
+        Assert.Contains("\"inlineData\"", capturedBody);
+        Assert.Contains("\"mimeType\":\"application/pdf\"", capturedBody);
+        Assert.Contains(Convert.ToBase64String(documentBytes), capturedBody);
+    }
+
+    [Fact]
+    public async Task ExtractStatementDoesNotSendAnInlineDataFieldOnClassifyRequests()
+    {
+        // RequestJsonOptions.DefaultIgnoreCondition must actually omit inlineData
+        // when it's null (the classify path), not send a literal "inlineData": null --
+        // verified against the real API's tolerance for this during manual testing.
+        var handler = new FakeHttpMessageHandler((_, _) => GeminiEnvelope(ValidCandidateJson()));
+        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model");
+
+        await provider.ClassifyMccAsync(Profile, Hints, Budget());
+
+        Assert.DoesNotContain("inlineData", handler.RequestBodies[0]);
+    }
+
+    [Fact]
+    public async Task ExtractStatementTreatsMissingFieldsAsNullRatherThanFailing()
+    {
+        var partialJson = JsonSerializer.Serialize(new { processor = "Acme", commentary = "illegible statement" });
+        var handler = new FakeHttpMessageHandler((_, _) => GeminiEnvelope(partialJson));
+        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model");
+
+        var result = await provider.ExtractStatementAsync([1, 2, 3], "image/png", Budget());
+
+        Assert.Equal("Acme", result.Processor);
+        Assert.Null(result.MonthlyVolume);
+        Assert.Null(result.DiscountRatePercent);
+    }
+
+    [Fact]
+    public async Task ExtractStatementThrowsWhenTheResponseIsNotValidJsonWithNoRetry()
+    {
+        // Deliberately no repair retry for extraction -- resending the (potentially
+        // large) file bytes a second time risks the 20s cap on its own; the caller
+        // (EvaluationService) falls back to the mock extractor instead.
+        var handler = new FakeHttpMessageHandler((_, _) => GeminiEnvelope("not json"));
+        var provider = new GeminiEvaluationProvider(ClientWith(handler), "test-key", "gemini-test-model");
+
+        await Assert.ThrowsAsync<DependencyUnavailableException>(() => provider.ExtractStatementAsync([1, 2, 3], "application/pdf", Budget()));
+        Assert.Equal(1, handler.CallCount);
+    }
+
     private sealed class HangingHttpMessageHandler(TaskCompletionSource<HttpResponseMessage> source) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

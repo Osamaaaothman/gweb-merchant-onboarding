@@ -19,6 +19,12 @@ public sealed class S3DocumentStorage(IAmazonS3 client, string bucketName) : IDo
 {
     private const int LeadingBytesToRead = 16;
 
+    // A processing statement is a small PDF/image, not a video -- 15MB is generous
+    // headroom while still bounding memory use and the time a full download can take
+    // within the deadline budget. Checked against metadata before the download starts,
+    // not after, so an oversized object never gets pulled into memory at all.
+    private const long MaxDownloadSizeBytes = 15 * 1024 * 1024;
+
     public async Task<PresignedUpload> CreatePresignedUploadAsync(
         string s3Key,
         string contentType,
@@ -70,6 +76,28 @@ public sealed class S3DocumentStorage(IAmazonS3 client, string bucketName) : IDo
         await responseStream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
 
         return new UploadedObject(metadata.ContentLength, metadata.ChecksumSHA256, buffer.ToArray());
+    }
+
+    public async Task<byte[]?> DownloadObjectAsync(string s3Key, DeadlineBudget budget, CancellationToken cancellationToken = default)
+    {
+        var metadata = await GetMetadataOrNullAsync(s3Key, budget, cancellationToken).ConfigureAwait(false);
+        if (metadata is null)
+        {
+            return null;
+        }
+        if (metadata.ContentLength > MaxDownloadSizeBytes)
+        {
+            throw new ValidationException($"Object exceeds the maximum downloadable size of {MaxDownloadSizeBytes} bytes.");
+        }
+
+        var getRequest = new GetObjectRequest { BucketName = bucketName, Key = s3Key };
+        using var getResponse = await S3CallExecutor.ExecuteAsync(
+            ct => client.GetObjectAsync(getRequest, ct), budget, cancellationToken).ConfigureAwait(false);
+        using var responseStream = getResponse.ResponseStream;
+        using var buffer = new MemoryStream();
+        await responseStream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+
+        return buffer.ToArray();
     }
 
     /// <summary>

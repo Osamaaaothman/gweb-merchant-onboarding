@@ -73,4 +73,27 @@ public class MockEvaluationProviderTests
 
         Assert.NotEmpty(result.Candidates);
     }
+
+    [Fact]
+    public async Task ExtractStatementReturnsAFixtureLabelledAsMockRegardlessOfTheBytesGiven()
+    {
+        var provider = new MockEvaluationProvider();
+
+        var result = await provider.ExtractStatementAsync("not a real pdf"u8.ToArray(), "application/pdf", Budget());
+
+        Assert.Equal("mock", result.Provider);
+        Assert.NotNull(result.MonthlyVolume);
+        Assert.NotNull(result.DiscountRatePercent);
+    }
+
+    [Fact]
+    public async Task ExtractStatementIgnoresTheActualBytesEntirely()
+    {
+        var provider = new MockEvaluationProvider();
+
+        var fromEmpty = await provider.ExtractStatementAsync([], "application/pdf", Budget());
+        var fromNonEmpty = await provider.ExtractStatementAsync([1, 2, 3, 4, 5], "image/png", Budget());
+
+        Assert.Equal(fromEmpty, fromNonEmpty);
+    }
 }

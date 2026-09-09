@@ -82,4 +82,68 @@ public class S3DocumentStorageTests
 
         mockClient.Verify(c => c.GetObjectAsync(It.Is<GetObjectRequest>(r => r.ByteRange != null), It.IsAny<CancellationToken>()), Times.Once);
     }
+
+    [Fact]
+    public async Task DownloadObjectReturnsNullWhenTheObjectDoesNotExist()
+    {
+        var mockClient = new Mock<IAmazonS3>();
+        mockClient
+            .Setup(c => c.GetObjectMetadataAsync(It.IsAny<GetObjectMetadataRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AmazonS3Exception("not found") { StatusCode = HttpStatusCode.NotFound });
+        var storage = new S3DocumentStorage(mockClient.Object, BucketName);
+
+        var result = await storage.DownloadObjectAsync("applications/x/documents/y/z.pdf", Budget());
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task DownloadObjectReturnsTheFullBodyNotJustLeadingBytes()
+    {
+        var content = "%PDF-1.7 this is the entire fake statement content, well past sixteen bytes"u8.ToArray();
+        var mockClient = new Mock<IAmazonS3>();
+        mockClient
+            .Setup(c => c.GetObjectMetadataAsync(It.IsAny<GetObjectMetadataRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectMetadataResponse { ContentLength = content.Length });
+        mockClient
+            .Setup(c => c.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse { ResponseStream = new MemoryStream(content) });
+        var storage = new S3DocumentStorage(mockClient.Object, BucketName);
+
+        var result = await storage.DownloadObjectAsync("applications/x/documents/y/z.pdf", Budget());
+
+        Assert.Equal(content, result);
+    }
+
+    [Fact]
+    public async Task DownloadObjectRequestsTheWholeObjectNotARangedRead()
+    {
+        var mockClient = new Mock<IAmazonS3>();
+        mockClient
+            .Setup(c => c.GetObjectMetadataAsync(It.IsAny<GetObjectMetadataRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectMetadataResponse { ContentLength = 1024 });
+        mockClient
+            .Setup(c => c.GetObjectAsync(It.IsAny<GetObjectRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectResponse { ResponseStream = new MemoryStream(new byte[1024]) });
+        var storage = new S3DocumentStorage(mockClient.Object, BucketName);
+
+        await storage.DownloadObjectAsync("applications/x/documents/y/z.pdf", Budget());
+
+        mockClient.Verify(c => c.GetObjectAsync(It.Is<GetObjectRequest>(r => r.ByteRange == null), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task DownloadObjectThrowsRatherThanDownloadingAnObjectOverTheSizeCap()
+    {
+        var mockClient = new Mock<IAmazonS3>(MockBehavior.Strict);
+        mockClient
+            .Setup(c => c.GetObjectMetadataAsync(It.IsAny<GetObjectMetadataRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new GetObjectMetadataResponse { ContentLength = 20 * 1024 * 1024 }); // 20MB, over the 15MB cap
+        var storage = new S3DocumentStorage(mockClient.Object, BucketName);
+
+        // MockBehavior.Strict on the client means GetObjectAsync was never configured --
+        // if the implementation tried to download anyway, this throws for an
+        // unconfigured call before ever reaching the assertion below.
+        await Assert.ThrowsAsync<ValidationException>(() => storage.DownloadObjectAsync("applications/x/documents/y/z.pdf", Budget()));
+    }
 }

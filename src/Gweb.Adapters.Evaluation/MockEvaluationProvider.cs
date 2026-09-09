@@ -39,4 +39,26 @@ public sealed class MockEvaluationProvider : IEvaluationProvider
 
         return Task.FromResult(new McSuggestion("mock", candidates));
     }
+
+    /// <summary>
+    /// Ignores documentBytes/contentType entirely -- per brief "Statement extraction
+    /// into normalized values (from fixture in mock mode)." A fixed, clearly-labelled
+    /// example statement, not derived from whatever was actually uploaded.
+    /// </summary>
+    public Task<StatementExtraction> ExtractStatementAsync(
+        byte[] documentBytes, string contentType, DeadlineBudget budget, CancellationToken cancellationToken = default)
+    {
+        var extraction = new StatementExtraction(
+            Processor: "Example Processing Co.",
+            MonthlyVolume: 50_000m,
+            DiscountRatePercent: 2.6m,
+            PerTransactionFee: 0.10m,
+            MonthlyFee: 25m,
+            ChargebackFeeTotal: 15m,
+            StatementPeriod: "Mock fixture -- not derived from the uploaded file",
+            Commentary: "Mock fixture data: a representative small-merchant processing statement, not extracted from the actual uploaded document.",
+            Provider: "mock");
+
+        return Task.FromResult(extraction);
+    }
 }
