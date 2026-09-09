@@ -48,6 +48,7 @@ Be specific per area, not generic.
 | MCC catalog (Phase 5) | Compiled a 276-code catalog from the well-established public MCC taxonomy (flagged honestly as a substitute for the brief's named paid source -- see ADR-0004), built a real, runnable import tool (`tools/McCatalogImport`) that validates and regenerates the packaged JSON, `StaticMccCatalog` (in-memory search, no DynamoDB -- justified in ADR-0004), `GET /v1/mcc?query=...` | *(Osama: fill in)* |
 | Risk policy engine (Phase 6) | `IRiskPolicy` structurally decoupled from `IMccCatalog` (no shared type between them), `StaticRiskPolicy` with a resolution order (provider override -> base rule -> document default) that has no hardcoded fallback anywhere outside the one config value; hand-authored (not imported) risk-policy.json with real provider overrides proving 6012 evaluates to three different levels under three configs; `NoAutoApprovalPathTests` enforces "never auto-approve" structurally against the domain's own enum vocabulary, not just as a promise in prose | *(Osama: fill in)* |
 | AI evaluation adapter + MCC classify (Phase 7) | Osama supplied a real Gemini API key mid-session (not Anthropic/OpenAI/Bedrock, the brief's named examples -- no vendor is mandated) with the instruction to use only free-tier models and build so the system works with or without a real key at grading time. Built `IEvaluationProvider` + `MockEvaluationProvider` (deterministic, reuses real catalog hints) + `GeminiEvaluationProvider` (real HTTP calls, schema validation, one bounded repair retry, budget-derived timeout capped at 20s -- see §5 for the empirical latency finding behind that cap). `ClassificationService` grounds every request against the real MCC catalog, drops hallucinated codes, and falls back to the mock provider (clearly labelled) if the real one fails. `POST/GET .../classify`, `POST .../classify/confirm`. Verified against the live Gemini API multiple times, including one full real request through the entire stack that correctly classified a grocery description as MCC 5411 -- see ADR-0006 | *(Osama: fill in)* |
+| Rate evaluation + risk signals (Phase 8) | Extended `IEvaluationProvider` with real multimodal statement extraction -- `GeminiEvaluationProvider` sends the actual document bytes to Gemini as an inline part, verified directly against the live API (a realistic synthetic statement extracted exactly, ~6s). `EffectiveRateCalculator` is pure/deterministic (never reads AI commentary, only 5 numeric fields); `RiskSignalDetector` computes every brief-named signal category from data already in the system (not an AI judgment call), each citing a `sourceField`. New `Gweb.Domain.Documents.IDocumentStorage.DownloadObjectAsync` (full bytes, size-capped, distinct from the existing 16-byte signature-check read). `POST /v1/applications/{id}/evaluate` (202+Processing async-fallback contract when budget is too low to attempt), `GET .../evaluation` | *(Osama: fill in)* |
 
 *(Osama: the "My involvement" column is intentionally blank — Claude should not write
 this in your voice. Fill it in with what you actually reviewed, questioned, or would
@@ -323,6 +324,51 @@ detail in that specific exception.
 asserts a security property, versus one that's just documentation?)*
 **Fix:** Caught during this phase's own build, before ever running -- removed the
 `ex.Message` argument, matching the actual established convention.
+
+---
+
+**Issue:** Two new Phase 8 repository test files (`InMemoryEvaluationRepositoryTests`,
+`DynamoDbEvaluationRepositoryTests`) failed with a real `ConflictException` /
+"no exception was thrown" mismatch. Root cause: `expectedVersion` in this codebase's
+optimistic-concurrency convention is always the version *already persisted before* the
+local mutation that's about to be saved -- not the in-memory object's own current
+`Version` after calling a domain mutation method. The tests passed `expectedVersion: 1`
+for a second save immediately after a mutation had locally bumped `Version` to 1, but
+what was actually stored from the *first* save was still `Version: 0` (the mutation
+happened after that save, not before it) -- a genuine misapplication of a convention
+this session had already used correctly six times over in earlier phases (Document,
+Applicant, Business, McClassification), not a new kind of mistake, just an inconsistent
+application of it.
+**Why it mattered:** Both the production repository code and the domain entity were
+correct; only the tests' understanding of their own inputs was wrong. Worth noting
+precisely because it's the kind of error that's easy to keep making even after getting
+it right several times before -- the convention is "the version you last successfully
+saved," and every call site needs to track that explicitly, not infer it from the
+object's current state.
+**What I did:** *(Osama: fill in)*
+**Fix:** Corrected `expectedVersion` in both tests to match what was actually stored;
+added an explanatory comment at each call site referencing the convention.
+
+---
+
+**Issue:** Several new Phase 8 test files, in namespaces like `Gweb.Tests.Adapters.Persistence`
+and `Gweb.Tests.Services.Evaluation`, failed to compile with `CS0234` ("does not exist
+in the namespace") when referencing the bare `Evaluation` domain type -- even after
+adding an explicit `using Evaluation = Gweb.Domain.Evaluation.Evaluation;` alias, which
+did *not* fix it. Root cause: sibling test namespaces this same phase created
+(`Gweb.Tests.Adapters.Evaluation`, from the Gemini/Mock provider test files) sit under
+the same parent (`Gweb.Tests.Adapters`) as the failing files, and C#'s name-resolution
+rules give namespace-member lookup in an *enclosing* scope strictly higher priority
+than a `using`-alias declared in the same file -- so the sibling namespace's existence
+silently wins even when a same-named alias explicitly says otherwise.
+**Why it mattered:** This is a real, non-obvious C# gotcha (a `using` alias failing to
+resolve an ambiguity it looks like it should resolve) that would have been confusing to
+debug without checking the language specification's actual lookup order rather than
+assuming "an alias always wins."
+**What I did:** *(Osama: fill in)*
+**Fix:** Fully qualified every such reference with `global::Gweb.Domain.Evaluation.Evaluation`
+instead of relying on an alias, with a comment explaining why the alias doesn't work
+here (so a future edit doesn't "simplify" it back to a broken alias).
 
 ---
 

@@ -44,6 +44,14 @@ public sealed class GeminiEvaluationProvider(HttpClient httpClient, string apiKe
 
     private static readonly JsonSerializerOptions ResponseJsonOptions = new() { PropertyNameCaseInsensitive = true };
 
+    // Request bodies must omit inlineData entirely on a text-only call (classify) --
+    // Gemini's API was not verified to tolerate an explicit "inlineData": null field,
+    // so this is not a guess.
+    private static readonly JsonSerializerOptions RequestJsonOptions = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
     public async Task<McSuggestion> ClassifyMccAsync(
         BusinessProfileInput profile,
         IReadOnlyList<McCandidateSeed> catalogHints,
@@ -56,6 +64,80 @@ public sealed class GeminiEvaluationProvider(HttpClient httpClient, string apiKe
 
         return new McSuggestion("gemini", candidates);
     }
+
+    /// <summary>
+    /// Sends the actual document bytes as an inline multimodal part -- Gemini's API
+    /// genuinely reads PDF/image content this way, verified against the live API
+    /// during this phase's build (a plain-text file sent this way was correctly
+    /// described back). No repair retry here, unlike ClassifyMccAsync: resending the
+    /// same (potentially sizable) file bytes a second time risks blowing
+    /// GeminiCallExecutor's 20s cap on its own; EvaluationService's fallback to the
+    /// mock extractor is the safety net for this call instead.
+    /// </summary>
+    public async Task<StatementExtraction> ExtractStatementAsync(
+        byte[] documentBytes, string contentType, DeadlineBudget budget, CancellationToken cancellationToken = default)
+    {
+        var inlineData = new GeminiInlineData(contentType, Convert.ToBase64String(documentBytes));
+        var text = await CallOnceAsync(BuildExtractionPrompt(), budget, cancellationToken, inlineData).ConfigureAwait(false);
+
+        if (!TryParseExtraction(text, out var extraction))
+        {
+            throw new DependencyUnavailableException("Gemini did not return valid JSON matching the statement extraction schema.");
+        }
+        return extraction;
+    }
+
+    private static bool TryParseExtraction(string text, out StatementExtraction extraction)
+    {
+        extraction = null!;
+        var trimmed = StripMarkdownFences(text);
+
+        ExtractionSchema? schema;
+        try
+        {
+            schema = JsonSerializer.Deserialize<ExtractionSchema>(trimmed, ResponseJsonOptions);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+        if (schema is null)
+        {
+            return false;
+        }
+
+        extraction = new StatementExtraction(
+            schema.Processor,
+            schema.MonthlyVolume,
+            schema.DiscountRatePercent,
+            schema.PerTransactionFee,
+            schema.MonthlyFee,
+            schema.ChargebackFeeTotal,
+            schema.StatementPeriod,
+            schema.Commentary,
+            "gemini");
+        return true;
+    }
+
+    private static string BuildExtractionPrompt() => $$"""
+        You are extracting normalized figures from a merchant payment-processing statement
+        (attached as a file). Return strict JSON matching exactly this schema and nothing
+        else (no markdown fences, no commentary outside the "commentary" field):
+        {"processor": string|null, "monthlyVolume": number|null, "discountRatePercent": number|null,
+         "perTransactionFee": number|null, "monthlyFee": number|null, "chargebackFeeTotal": number|null,
+         "statementPeriod": string|null, "commentary": string|null}
+
+        Rules:
+        - Use null for any figure the statement does not clearly show -- never guess or
+          estimate a number that is not actually printed on the statement.
+        - "discountRatePercent" is the processor's percentage-based discount/effective rate
+          (e.g. 2.6 for 2.6%), not a dollar amount.
+        - "commentary" is a short (1-2 sentence) plain-language note about anything notable
+          in the statement -- it is read-only context for a human reviewer and must never be
+          treated as one of the numeric figures above.
+        - If the attached file is not a payment-processing statement at all, return every
+          numeric field as null and say so in "commentary".
+        """;
 
     private async Task<IReadOnlyList<McClassificationCandidate>> CallWithRepairRetryAsync(
         string prompt, DeadlineBudget budget, CancellationToken cancellationToken)
@@ -78,16 +160,20 @@ public sealed class GeminiEvaluationProvider(HttpClient httpClient, string apiKe
         throw new DependencyUnavailableException("Gemini did not return valid JSON matching the classification schema after a repair retry.");
     }
 
-    private Task<string> CallOnceAsync(string prompt, DeadlineBudget budget, CancellationToken cancellationToken) =>
+    private Task<string> CallOnceAsync(
+        string prompt, DeadlineBudget budget, CancellationToken cancellationToken, GeminiInlineData? inlineData = null) =>
         GeminiCallExecutor.ExecuteAsync(async ct =>
         {
+            var parts = inlineData is null
+                ? (IReadOnlyList<GeminiPart>)[new GeminiPart(Text: prompt)]
+                : [new GeminiPart(Text: prompt), new GeminiPart(InlineData: inlineData)];
             var requestBody = new GeminiRequest(
-                [new GeminiContent([new GeminiPart(prompt)])],
+                [new GeminiContent(parts)],
                 new GeminiGenerationConfig("application/json", MaxOutputTokens));
 
             using var request = new HttpRequestMessage(HttpMethod.Post, $"/v1beta/models/{model}:generateContent")
             {
-                Content = JsonContent.Create(requestBody),
+                Content = JsonContent.Create(requestBody, options: RequestJsonOptions),
             };
             request.Headers.Add("x-goog-api-key", apiKey);
 
@@ -220,7 +306,16 @@ public sealed class GeminiEvaluationProvider(HttpClient httpClient, string apiKe
 
     private sealed record GeminiContent([property: JsonPropertyName("parts")] IReadOnlyList<GeminiPart> Parts);
 
-    private sealed record GeminiPart([property: JsonPropertyName("text")] string Text);
+    // Text and InlineData are both optional so the same type serializes a text-only
+    // part (classify) or an inline-document part (statement extraction) without a
+    // spurious null field for the one not in use -- see RequestJsonOptions.
+    private sealed record GeminiPart(
+        [property: JsonPropertyName("text")] string? Text = null,
+        [property: JsonPropertyName("inlineData")] GeminiInlineData? InlineData = null);
+
+    private sealed record GeminiInlineData(
+        [property: JsonPropertyName("mimeType")] string MimeType,
+        [property: JsonPropertyName("data")] string Data);
 
     private sealed record GeminiGenerationConfig(
         [property: JsonPropertyName("responseMimeType")] string ResponseMimeType,
@@ -235,4 +330,14 @@ public sealed class GeminiEvaluationProvider(HttpClient httpClient, string apiKe
     private sealed record ClassificationSchema(IReadOnlyList<ClassificationCandidateSchema>? Candidates);
 
     private sealed record ClassificationCandidateSchema(string? MccCode, decimal Confidence, string? Explanation);
+
+    private sealed record ExtractionSchema(
+        string? Processor,
+        decimal? MonthlyVolume,
+        decimal? DiscountRatePercent,
+        decimal? PerTransactionFee,
+        decimal? MonthlyFee,
+        decimal? ChargebackFeeTotal,
+        string? StatementPeriod,
+        string? Commentary);
 }

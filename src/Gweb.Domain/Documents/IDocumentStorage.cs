@@ -30,4 +30,14 @@ public interface IDocumentStorage
 
     /// <summary>Null if no object exists at that key yet (upload not completed).</summary>
     Task<UploadedObject?> GetUploadedObjectAsync(string s3Key, DeadlineBudget budget, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Full object bytes -- unlike GetUploadedObjectAsync (16 leading bytes, for the
+    /// file-signature check), this is for a caller that actually needs the content,
+    /// e.g. EvaluationService sending a processing statement to a multimodal AI
+    /// provider. Null if no object exists at that key. Implementations should cap the
+    /// size they'll actually read (see S3DocumentStorage) rather than trust
+    /// DeclaredSizeBytes blindly.
+    /// </summary>
+    Task<byte[]?> DownloadObjectAsync(string s3Key, DeadlineBudget budget, CancellationToken cancellationToken = default);
 }

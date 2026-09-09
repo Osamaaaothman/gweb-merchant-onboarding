@@ -550,3 +550,58 @@ over: `GeminiEvaluationProvider` has more independent failure-mode branches than
 test suite exercises every pairwise combination of).
 
 Merged to `main` with `--no-ff`, pushed.
+
+---
+
+## 2026-09-09 (same day, continued) — Phase 8 (rate evaluation & risk signals) built, verified live, merged
+
+Continued straight from Phase 7 on "يس كمل" (yes, continue).
+
+**What got built:** `IEvaluationProvider` extended with `ExtractStatementAsync`
+(`MockEvaluationProvider` returns a labelled fixture; `GeminiEvaluationProvider` sends
+the actual document bytes as a real multimodal `inlineData` part -- verified against
+the live API). `EffectiveRateCalculator` (pure, deterministic -- never reads AI
+commentary) and `RiskSignalDetector` (deterministic detection for every brief-named
+signal category, each citing a `sourceField`) in `Gweb.Domain.Evaluation`. `Evaluation`
+as its own aggregate (`sk=EVALUATION`), same reasoning as `McClassification` --
+`EvaluationService` orchestrating extraction-with-fallback, the math, the signals, and
+a real "budget too low, mark Processing, return 202" path per brief's async-fallback
+requirement. `POST /v1/applications/{id}/evaluate`, `GET .../evaluation`. New
+`IDocumentStorage.DownloadObjectAsync` (full bytes, size-capped) alongside the existing
+16-byte signature-check read. No `infra/template.yaml` change needed at all --
+`Evaluation` lives on the same DynamoDB table and uses the same S3 actions already
+granted.
+
+**Real bugs found and fixed this phase** (full detail in `AI-USAGE.md` §5):
+1. Two new repository tests misapplied the optimistic-concurrency `expectedVersion`
+   convention (passed the object's post-mutation Version instead of what was actually
+   persisted before the mutation) -- caught by the tests failing for real, not by
+   inspection, despite the same convention having been used correctly six times over in
+   earlier phases.
+2. A genuine C# gotcha: a `using Evaluation = ...;` alias could not resolve an
+   ambiguity between the domain type and a sibling test namespace this same phase
+   created (`Gweb.Tests.Adapters.Evaluation`) -- namespace-member lookup in an
+   enclosing scope beats a same-file alias, per the C# spec's lookup order. Fixed with
+   full `global::` qualification instead, documented so it isn't "simplified" back.
+
+**Verified for real, live, against the actual Gemini API** (not simulated): ran
+`GeminiEvaluationProvider.ExtractStatementAsync` directly (a small standalone harness
+in the session scratchpad, not part of the repo) against a realistic synthetic
+merchant statement. First attempt hit a genuine HTTP 503 (free-tier overload -- the
+exact failure mode `DependencyUnavailableException` exists to handle); a retry
+succeeded in ~6 seconds and extracted every field exactly right (processor, monthly
+volume $48,732.15, discount rate 2.65%, per-transaction/monthly/chargeback fees,
+statement period) plus a coherent one-sentence commentary. Full HTTP-level
+orchestration (`EvaluationService`, the endpoints, a real presign/complete document
+upload) is tested end-to-end against a simulated upload with a fake provider; only the
+combination of "real HTTP upload all the way through + real Gemini multimodal call in
+one live run" is unverified, honestly, since this session has no AWS account to put a
+real file in S3 for a real end-to-end run -- documented in ADR-0007 and the README's
+Known Gaps rather than glossed over.
+
+**Verified for real, standard checks:** `dotnet build` (0 warnings/errors),
+`dotnet test` -- 355/355 passing (up from 294), coverage 93.7%/83.0% (up from Phase
+7's 92.6%/82.2% -- the new domain code is small, pure, and thoroughly edge-case tested
+by design).
+
+Merged to `main` with `--no-ff`, pushed.

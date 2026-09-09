@@ -1,4 +1,5 @@
 using Gweb.Domain.Applications;
+using Gweb.Domain.Evaluation;
 using Gweb.Domain.RiskPolicy;
 
 namespace Gweb.Tests.Architecture;
@@ -17,6 +18,7 @@ public class NoAutoApprovalPathTests
     [
         typeof(ApplicationStatus),
         typeof(RiskLevel),
+        typeof(EvaluationStatus),
     ];
 
     [Fact]

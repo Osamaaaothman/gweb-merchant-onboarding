@@ -28,6 +28,10 @@ public class ClassificationServiceTests
             }
             return Task.FromResult(onCall!());
         }
+
+        public Task<StatementExtraction> ExtractStatementAsync(
+            byte[] documentBytes, string contentType, DeadlineBudget budget, CancellationToken cancellationToken = default) =>
+            throw new NotImplementedException("Not exercised by ClassificationServiceTests -- see EvaluationServiceTests.");
     }
 
     private static DeadlineBudget Budget() => DeadlineBudget.Start(35_000, new FakeClock(0), targetMs: 35_000);
